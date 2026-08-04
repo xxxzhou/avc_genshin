@@ -1,0 +1,40 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# ── 大文件资源（docs/design/03 §5.1）──
+# 模型 / 全地图 / OCR 大模型：本地放或经 BGI_ROOT 复用，不进 git
+resources/models/
+resources/map/
+resources/ocr/
+# 模板 / 路径是小文件，进 git（取消下面注释即忽略）：
+# resources/templates/
+# resources/paths/
+
+# ── 运行产物（docs/design/03 §3）──
+logs/
+debug/
+cache/
+
+# ── 本地配置 / 凭证 ──
+.env
+config.local.toml
+
+# ── avc 构建产物（若误放进来）──
+*.pyd
+*.dll
+*.so
+
+# ── IDE / OS ──
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

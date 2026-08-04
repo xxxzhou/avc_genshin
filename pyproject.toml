@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avc-genshin"
+version = "0.1.0"
+description = "以 AI 动态添加任务为核心的原神自动化框架（Python 代码即流程）"
+readme = "CLAUDE.md"
+requires-python = ">=3.10"
+license = { text = "研究/学习用途" }
+authors = [{ name = "avc_genshin" }]
+keywords = ["genshin", "automation", "cv", "ai"]
+
+# avc（C++ SDK）不发布到 PyPI：本地构建后经 AVC_HOME 环境变量定位，
+# 由 framework 在运行时自动探测（见 swig/python/avc/__init__.py）。
+dependencies = [
+    # numpy<2：onnxruntime/BGI 生态按 numpy 1.x 构建；numpy 2.x 触发 ABI 问题。
+    "numpy>=1.24,<2",
+    "opencv-python>=4.8",
+    # onnxruntime 上限：1.23.x 的原生二进制在 Microsoft Store 版 Python 初始化失败
+    # （DLL init failed）；1.20.1 实测可用。详见 src/abilities/detector.py。
+    "onnxruntime>=1.20.1,<1.23",
+]
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.40"]   # AI 协作层（规划/生成，阶段五）
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+avc-genshin = "framework.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+# 仅打包 framework / abilities（真实 import 包）。
+# tasks/ 是扫描目录（无 __init__.py），不作为 import 包，故不被发现——符合
+# docs/design/03 §3「tasks/ 随仓库 git，运行时 importlib 按文件加载，不打包」。
+include = ["framework*", "abilities*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
