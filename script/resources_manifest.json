@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "description": "avc_genshin 大文件资源清单（唯一权威）。BGI 的 ONNX 模型与全地图 SIFT 数据体量大（几十~几百 MB），不进 git（.gitignore 已忽略 resources/models、resources/map、resources/ocr）。BGI 也不单独发布这些资源——全部打包在 BetterGI_vX.7z release 包里。本清单被 script/fetch_resources.py 读取：下载该包一次（缓存到 cache/bgi_release/），按 item 从中只提取需要的文件到 resources/。",
+  "usage": "python script/fetch_resources.py --list          # 列出全部资源及就绪状态\n        python script/fetch_resources.py --check         # 仅检查缺失，不下载\n        python script/fetch_resources.py --phase C       # 获取阶段 C（战斗）所需\n        python script/fetch_resources.py --all           # 获取全部\n        python script/fetch_resources.py --select avatar_side,q_classify\n        python script/fetch_resources.py --all --bgi-root D:/path/to/BGI  # 从本地 BGI 安装目录复制（免下载）",
+  "bgi_release": {
+    "tag": "0.62.0",
+    "url": "https://github.com/babalae/better-genshin-impact/releases/download/0.62.0/BetterGI_v0.62.0.7z",
+    "archive": "BetterGI_v0.62.0.7z",
+    "size_mb": 424,
+    "cache_dir": "cache/bgi_release",
+    "note": "BGI 全量包；所有 item 的 bgi_path 都是相对包内 Assets/ 的逻辑路径。包内可能有顶层目录前缀（如 BetterGI/），脚本用后缀匹配定位，无需假设固定前缀。下载一次缓存复用。"
+  },
+  "categories": {
+    "model": "resources/models",
+    "map": "resources/map"
+  },
+  "items": [
+    {
+      "id": "bgi_world",
+      "name": "世界目标检测 YOLO",
+      "category": "model",
+      "bgi_path": "Assets/Model/World/bgi_world.onnx",
+      "filename": "bgi_world.onnx",
+      "phase": "B",
+      "verify_files": ["resources/models/bgi_world.onnx"],
+      "note": "GenshinDetector 世界目标检测；detector.py 已就绪，待此模型。来源 BgiOnnxModel.cs:BgiWorld。"
+    },
+    {
+      "id": "avatar_side",
+      "name": "角色侧栏识别（分类）",
+      "category": "model",
+      "bgi_path": "Assets/Model/Common/avatar_side_classify_sim.onnx",
+      "filename": "avatar_side_classify_sim.onnx",
+      "phase": "C",
+      "verify_files": ["resources/models/avatar_side_classify_sim.onnx"],
+      "note": "战斗时识别当前出战角色（argmax 分类）。来源 BgiOnnxModel.cs:BgiAvatarSide。"
+    },
+    {
+      "id": "q_classify",
+      "name": "Q 技能可用分类",
+      "category": "model",
+      "bgi_path": "Assets/Model/Common/q_classify_sim.onnx",
+      "filename": "q_classify_sim.onnx",
+      "phase": "C",
+      "verify_files": ["resources/models/q_classify_sim.onnx"],
+      "note": "判断 Q 技能（大招）是否就绪；SimpleFighter 连招用它决策。来源 BgiOnnxModel.cs:BgiQClassify。"
+    },
+    {
+      "id": "avatar_grid",
+      "name": "头像网格特征（角色识别备选）",
+      "category": "model",
+      "bgi_path": "Assets/Model/AvatarGridIcon/avatar.onnx",
+      "filename": "avatar.onnx",
+      "phase": "C",
+      "in_release": false,
+      "verify_files": ["resources/models/avatar.onnx"],
+      "note": "BGI 源码 BgiOnnxModel.cs 引用此路径,但 release 7z 包未收录(实测 BetterGI_v0.62.0.7z 内无 AvatarGridIcon 目录)。in_release=false 脚本跳过提取;avatar_side 已够角色识别,可忽略。"
+    },
+    {
+      "id": "bgi_tree",
+      "name": "秘境古树识别",
+      "category": "model",
+      "bgi_path": "Assets/Model/Domain/bgi_tree.onnx",
+      "filename": "bgi_tree.onnx",
+      "phase": "D",
+      "verify_files": ["resources/models/bgi_tree.onnx"],
+      "note": "自动秘境结算时定位古树（消耗树）。来源 BgiOnnxModel.cs:BgiTree。"
+    },
+    {
+      "id": "bgi_mine",
+      "name": "挖矿目标检测",
+      "category": "model",
+      "bgi_path": "Assets/Model/Mine/bgi_mine.onnx",
+      "filename": "bgi_mine.onnx",
+      "phase": "D",
+      "verify_files": ["resources/models/bgi_mine.onnx"],
+      "note": "矿石 YOLO 检测（自动挖矿）。来源 BgiOnnxModel.cs:BgiMine。"
+    },
+    {
+      "id": "bgi_fish",
+      "name": "钓鱼目标检测",
+      "category": "model",
+      "bgi_path": "Assets/Model/Fish/bgi_fish.onnx",
+      "filename": "bgi_fish.onnx",
+      "phase": "D",
+      "verify_files": ["resources/models/bgi_fish.onnx"],
+      "note": "抛竿/上钩鱼点 YOLO 检测（自动钓鱼）。来源 BgiOnnxModel.cs:BgiFish。"
+    },
+    {
+      "id": "full_map",
+      "name": "全地图 SIFT 特征数据（目录）",
+      "category": "map",
+      "bgi_path": "Assets/Map",
+      "filename": null,
+      "phase": "B",
+      "verify_files": ["resources/map/Assets/Map"],
+      "note": "FeatureStorage 全地图特征点（整个目录，约 50-500MB）。小地图定位用；阶段 B 导航定位精度依赖它。bgi_path 为目录，脚本提取其下全部文件。"
+    },
+    {
+      "id": "tp_json",
+      "name": "传送点数据库",
+      "category": "map",
+      "bgi_path": "GameTask/AutoTrackPath/Assets/tp.json",
+      "filename": "tp.json",
+      "phase": "B",
+      "verify_files": ["resources/map/tp.json"],
+      "note": "TpDatabase 传送点库（g.teleport_to 按名传送；顺带修复 phase_a/b 8 项 TpDatabase 测试）。来源 BetterGI GameTask/AutoTrackPath/Assets/tp.json。"
+    }
+  ]
+}

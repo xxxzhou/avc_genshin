@@ -337,6 +337,63 @@ class TestCameraControl:
         assert CameraControl._angle_diff(10, 350) == 20.0
 
 
+# ── avc IOrientationDetector 忠实性对比（需 avc + avc_opencv 插件）──
+
+
+def _avc_od_available() -> bool:
+    try:
+        import avc
+
+        return avc.Vision.createOrientationDetector() is not None
+    except Exception:
+        return False
+
+
+class TestOrientationAvc:
+    """C++（avc）与 Python compute_orientation 输出必须一致（验证 BGI 移植忠实）。"""
+
+    pytestmark = pytest.mark.skipif(
+        not _avc_od_available(), reason="需 avc + avc_opencv 插件"
+    )
+
+    def _compare(self, gray):
+        import avc
+        from avc._core import ImageType
+
+        from abilities.navigation.camera import compute_orientation
+
+        ang_py = compute_orientation(gray.copy())
+        buf = avc.Image.IImageBuffer()
+        buf.setFormat(212, 212, ImageType.r8)
+        buf.from_bytes(gray.tobytes())
+        ang_avc = avc.Vision.createOrientationDetector().compute(buf)
+        assert ang_py == ang_avc, f"角度不一致: py={ang_py}, avc={ang_avc}"
+
+    def test_noise(self):
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        self._compare(rng.integers(0, 256, (212, 212), dtype=np.uint8))
+
+    def test_arrow_wedge(self):
+        import numpy as np
+
+        img = np.zeros((212, 212), np.uint8)
+        for r in range(20, 90):
+            for th in range(45, 90, 2):  # 径向楔形（模拟角色箭头）
+                x = 106 + int(r * np.cos(np.radians(th)))
+                y = 106 + int(r * np.sin(np.radians(th)))
+                if 0 <= x < 212 and 0 <= y < 212:
+                    img[y, x] = 255
+        self._compare(img)
+
+    def test_gradient(self):
+        import numpy as np
+
+        gx, gy = np.meshgrid(np.arange(212), np.arange(212))
+        self._compare(((gx + gy) * 255 / 420).astype(np.uint8))
+
+
 # ── TrapEscaper 测试 ──
 
 
@@ -577,3 +634,165 @@ class TestCameraImport:
         assert MINIMAP_SIZE == 212
         assert MINIMAP_CENTER_X == 168
         assert MINIMAP_CENTER_Y == 125
+
+
+# ── PathExecutor action 派发 ──
+
+
+class TestPathExecutorActions:
+    def test_action_dispatch(self, monkeypatch):
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import (
+            PathExecutor,
+            PathTask,
+            PathTaskInfo,
+            Waypoint,
+        )
+
+        g = MagicMock()
+        monkeypatch.setattr(
+            "abilities.navigation.navigator.Navigator",
+            lambda ctx, g: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "abilities.navigation.tp.Teleporter", lambda ctx, g: MagicMock()
+        )
+        pe = PathExecutor(MagicMock(), g)
+        pt = PathTask(
+            info=PathTaskInfo(name="t", task_type="collect"),
+            waypoints=(
+                Waypoint(x=0, y=0, type="teleport"),
+                Waypoint(x=1, y=1, type="path", action="stop_flying"),
+                Waypoint(x=2, y=2, type="path", action="fight"),
+                Waypoint(x=3, y=3, type="path", action="pick_up"),
+                Waypoint(x=4, y=4, type="path", action="mystery"),
+            ),
+        )
+        pe.execute(pt)
+        pressed = [c.args[0] for c in g.press.call_args_list]
+        assert KeyCode.space in pressed  # stop_flying → 空格落地
+        assert KeyCode.f in pressed  # pick_up → F
+        g.fight_until_clear.assert_called_once()  # fight → 战斗
+        assert any("mystery" in w for w in pe.warnings)  # 未实现 action → warning
+
+    def test_no_action_no_press(self, monkeypatch):
+        from abilities.navigation.path_executor import (
+            PathExecutor,
+            PathTask,
+            PathTaskInfo,
+            Waypoint,
+        )
+
+        g = MagicMock()
+        monkeypatch.setattr("abilities.navigation.navigator.Navigator", lambda c, g: MagicMock())
+        pe = PathExecutor(MagicMock(), g)
+        pt = PathTask(
+            info=PathTaskInfo(name="t"),
+            waypoints=(Waypoint(x=1, y=1, type="path"),),
+        )
+        pe.execute(pt)
+        g.press.assert_not_called()
+        g.fight_until_clear.assert_not_called()
+
+    def test_gadget_and_collect_actions(self, monkeypatch):
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import (
+            PathExecutor,
+            PathTask,
+            PathTaskInfo,
+            Waypoint,
+        )
+
+        g = MagicMock()
+        monkeypatch.setattr("abilities.navigation.navigator.Navigator", lambda c, g: MagicMock())
+        monkeypatch.setattr("abilities.navigation.tp.Teleporter", lambda c, g: MagicMock())
+        pe = PathExecutor(MagicMock(), g)
+        pt = PathTask(
+            info=PathTaskInfo(name="t"),
+            waypoints=(
+                Waypoint(x=0, y=0, type="teleport"),
+                Waypoint(x=1, y=1, type="path", action="use_gadget"),
+                Waypoint(x=2, y=2, type="path", action="collect"),
+            ),
+        )
+        pe.execute(pt)
+        pressed = [c.args[0] for c in g.press.call_args_list]
+        assert KeyCode.z in pressed  # use_gadget → Z
+        assert KeyCode.f in pressed  # collect → F
+
+
+# ── Navigator 移动模式 ──
+
+
+class TestNavigatorMoveModes:
+    @staticmethod
+    def _nav():
+        from abilities.navigation.navigator import Navigator
+
+        ctx = MagicMock()
+        ctx.ic = MagicMock()
+        nav = Navigator(ctx, MagicMock())
+        nav._position_getter = MagicMock(get_position=lambda: (0.0, 0.0))
+        nav._camera = MagicMock()
+        nav._trap_escaper = MagicMock(
+            is_stuck=lambda: True, escape=MagicMock(), should_abort=False
+        )
+        return nav, ctx
+
+    def test_fly_presses_space(self):
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        nav, ctx = self._nav()
+        nav.go_to(Waypoint(x=1.0, y=1.0, move_mode="fly"), timeout=0.05)
+        ctx.ic.press.assert_any_call(KeyCode.space, 50)
+
+    def test_climb_skips_trap_escape(self):
+        from abilities.navigation.path_executor import Waypoint
+
+        nav, ctx = self._nav()
+        nav.go_to(Waypoint(x=100.0, y=0.0, move_mode="climb"), timeout=0.05)
+        nav._trap_escaper.escape.assert_not_called()
+
+    def test_walk_triggers_trap_escape(self):
+        from abilities.navigation.path_executor import Waypoint
+
+        nav, ctx = self._nav()
+        nav.go_to(Waypoint(x=100.0, y=0.0, move_mode="walk"), timeout=0.05)
+        nav._trap_escaper.escape.assert_called()
+
+    def test_run_holds_and_releases_shift(self):
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        nav, ctx = self._nav()
+        nav.go_to(Waypoint(x=1.0, y=1.0, move_mode="run"), timeout=0.05)
+        ctx.ic.keyDown.assert_any_call(KeyCode.shift)  # 冲刺
+        ctx.ic.keyUp.assert_any_call(KeyCode.shift)  # finally 释放
+
+    def test_dash_holds_shift(self):
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        nav, ctx = self._nav()
+        nav.go_to(Waypoint(x=1.0, y=1.0, move_mode="dash"), timeout=0.05)
+        ctx.ic.keyDown.assert_any_call(KeyCode.shift)
+
+    def test_jump_periodic(self, monkeypatch):
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        monkeypatch.setattr("abilities.navigation.navigator._JUMP_INTERVAL_S", 0.1)
+        nav, ctx = self._nav()
+        nav._trap_escaper.is_stuck = lambda: False  # 不触发卡死, 让循环走到周期跳
+        nav.go_to(Waypoint(x=100.0, y=0.0, move_mode="jump"), timeout=0.5)
+        space_presses = [
+            c for c in ctx.ic.press.call_args_list if c.args[0] == KeyCode.space
+        ]
+        assert len(space_presses) > 0  # 周期跳被触发

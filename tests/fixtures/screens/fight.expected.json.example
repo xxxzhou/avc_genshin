@@ -1,0 +1,9 @@
+{
+  "_comment": "示例：把真名截图放这（如 fight.png），复制本文件为 fight.expected.json 填真实期望值即可自动断言。截 1080p 全屏。",
+  "blood_bars_min": 2,
+  "has_enemy": true,
+  "position": [2000, 1000],
+  "position_tol": 100,
+  "orientation": 90,
+  "orientation_tol": 10
+}

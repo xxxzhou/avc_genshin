@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from framework.authority import InputAuthority
 from framework.cancellation import CancellationToken, RunContext
 from framework.config import Config
+from framework.notify import notify
 from framework.errors import (
     CancelledError,
     InputConflict,
@@ -150,6 +151,8 @@ class Runtime:
         )
         self._g = HighLevelApi(self.ctx, runtime=self)
         observe.event("run_start", task=task_name)
+        self._notify_task = task_name
+        notify("task_start", task=task_name)
 
         for d in daemons:
             try:
@@ -170,6 +173,7 @@ class Runtime:
     async def _worker(self, fn: Callable, timeout: float | None) -> Any:
         """loop 协程：把 fn 丢到线程池跑，处理异常/超时/取消/重试（04 §3.2）。"""
         observe = self._observe
+        task = getattr(self, "_notify_task", "?")
         attempts = 0
         while True:
             try:
@@ -178,30 +182,37 @@ class Runtime:
                 else:
                     result = await asyncio.to_thread(fn, self.ctx, self._g)
                 observe.event("task_return", return_value=result)
+                notify("task_end", task=task)
                 return result
             except asyncio.TimeoutError:
                 observe.failure("Timeout", reason=f"超时 {timeout}s")
+                notify("task_error", task=task, error=f"超时 {timeout}s")
                 self._token.cancel("timeout")
                 raise
             except CancelledError as e:
                 observe.failure("Timeout", reason=f"取消：{e}")
+                notify("task_error", task=task, error=f"取消：{e}")
                 raise
             except NormalEnd as e:
                 observe.event("task_return", normal_end=True, reason=e.reason)
+                notify("task_end", task=task, normal_end=True, reason=e.reason)
                 return None
             except Retry as e:
                 attempts += 1
                 lim = e.attempts or 3
                 if attempts > lim:
                     observe.failure("TaskError", reason=f"重试 {lim} 次仍失败：{e.reason}")
+                    notify("task_error", task=task, error=f"重试 {lim} 次仍失败")
                     raise TaskError(reason=f"重试 {lim} 次仍失败：{e.reason}")
                 observe.event("retry", reason=e.reason, attempt=attempts)
                 continue  # 重跑 fn
             except TaskError as e:
                 observe.failure(e.failure_type, reason=e.reason)
+                notify("task_error", task=task, error=e.failure_type)
                 raise
             except Exception as e:
                 observe.failure("TaskError", reason=repr(e))
+                notify("task_error", task=task, error=repr(e))
                 observe.save_evidence(self.ctx, "crash")
                 raise
 

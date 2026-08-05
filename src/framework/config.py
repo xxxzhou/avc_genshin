@@ -85,13 +85,17 @@ class Config:
     # ── 校验 ──
 
     def check_resolution(self, width: int, height: int) -> None:
-        """启动分辨率检查：游戏窗口须 1920×1080（CLAUDE §8）。不符抛错。"""
+        """启动分辨率检查：游戏画面须 ≥ 1920×1080（CLAUDE §8）。
+
+        容许 buffer 含窗口边框（如 1926×1156），只要裁剪后能得到 1080p 游戏画面。
+        不再要求精确匹配，因为 DPI 缩放下 sc.width/height 报逻辑尺寸，buffer 实际像素更大。
+        """
         want_w, want_h = self.resolution
-        if (width, height) != (want_w, want_h):
+        if width < want_w or height < want_h:
             from framework.errors import AvcsError
 
             raise AvcsError(
-                f"分辨率需 {want_w}×{want_h}，实际 {width}×{height}。"
+                f"分辨率需 ≥ {want_w}×{want_h}，实际 {width}×{height}。"
                 f"请将原神设为 1920×1080 窗口模式（CLAUDE §8）。"
             )
 

@@ -43,6 +43,7 @@ _TOO_FAR_DISTANCE = 500.0  # 过远距离阈值
 _MOVE_TIMEOUT = 240.0  # 移动超时(秒)
 _ROTATE_MAX_DIFF = 5.0  # 旋转精度(度)
 _POSITION_RECORD_INTERVAL = 1.0  # 位置记录间隔(秒)
+_JUMP_INTERVAL_S = 2.0  # jump 移动模式周期跳间隔
 
 
 class Navigator:
@@ -80,13 +81,34 @@ class Navigator:
         start_time = time.monotonic()
         last_record_time = start_time
         too_far_count = 0
+        sprint = False  # run/dash 冲刺（finally 释放用）
 
         try:
+            # 移动模式: fly 先跳起进滑翔; climb 跳过卡死脱困(攀爬中不脱困)
+            mode = (getattr(waypoint, "move_mode", "") or "walk").strip() or "walk"
+            skip_trap = mode == "climb"
+            sprint = mode in ("run", "dash")  # 冲刺
+            is_jump = mode == "jump"  # 周期跳
+            last_jump = start_time
+
             # 初始朝向
             position = self._position_getter.get_position()
             if position is not None:
                 target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
                 self._camera.rotate_to(target_angle, max_diff=_ROTATE_MAX_DIFF)
+
+            # fly: 先跳起进入滑翔（实机验证空格键进入滑翔）
+            if mode == "fly":
+                try:
+                    self.ctx.ic.press(KeyCode.space, 50)
+                except Exception:
+                    pass
+            # run/dash: 按住 shift 冲刺
+            if sprint:
+                try:
+                    self.ctx.ic.keyDown(KeyCode.shift)
+                except Exception:
+                    pass
 
             # 按住 W 开始移动
             try:
@@ -118,29 +140,38 @@ class Navigator:
                 else:
                     too_far_count = 0
 
-                # 位置记录（卡死检测）
-                now = time.monotonic()
-                if now - last_record_time >= _POSITION_RECORD_INTERVAL:
-                    self._trap_escaper.record_position(*position)
-                    last_record_time = now
+                # 位置记录 + 卡死检测（climb 模式跳过，避免攀爬中误判乱跳）
+                if not skip_trap:
+                    now = time.monotonic()
+                    if now - last_record_time >= _POSITION_RECORD_INTERVAL:
+                        self._trap_escaper.record_position(*position)
+                        last_record_time = now
 
-                # 卡死检测
-                if self._trap_escaper.is_stuck():
-                    # 释放 W
+                    # 卡死检测
+                    if self._trap_escaper.is_stuck():
+                        # 释放 W
+                        try:
+                            self.ctx.ic.keyUp(KeyCode.w)
+                        except Exception:
+                            pass
+                        # 脱困
+                        self._trap_escaper.escape(waypoint)
+                        if self._trap_escaper.should_abort:
+                            return False
+                        # 重新按住 W
+                        try:
+                            self.ctx.ic.keyDown(KeyCode.w)
+                        except Exception:
+                            pass
+                        continue
+
+                # jump 模式: 周期跳（翻越/过坎，简化；实机验证）
+                if is_jump and time.monotonic() - last_jump >= _JUMP_INTERVAL_S:
                     try:
-                        self.ctx.ic.keyUp(KeyCode.w)
+                        self.ctx.ic.press(KeyCode.space, 30)
                     except Exception:
                         pass
-                    # 脱困
-                    self._trap_escaper.escape(waypoint)
-                    if self._trap_escaper.should_abort:
-                        return False
-                    # 重新按住 W
-                    try:
-                        self.ctx.ic.keyDown(KeyCode.w)
-                    except Exception:
-                        pass
-                    continue
+                    last_jump = time.monotonic()
 
                 # 旋转朝向目标
                 target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
@@ -151,11 +182,16 @@ class Navigator:
             return False  # 超时
 
         finally:
-            # 释放 W
+            # 释放 W (+ 冲刺 shift)
             try:
                 self.ctx.ic.keyUp(KeyCode.w)
             except Exception:
                 pass
+            if sprint:
+                try:
+                    self.ctx.ic.keyUp(KeyCode.shift)
+                except Exception:
+                    pass
 
     def get_position(self) -> tuple[float, float] | None:
         """获取当前玩家位置。"""

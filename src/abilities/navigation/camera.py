@@ -184,36 +184,62 @@ class CameraControl:
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
-        self._dpi: float = 1.0  # Windows DPI 缩放，运行时检测
+        self._dpi: float = ctx._dpi_scale  # Windows DPI 缩放比，从 GameContext 读取
+        self._od = None  # avc IOrientationDetector（懒加载）
 
     def get_orientation(self, frame: IImageBuffer | None = None) -> float | None:
-        """从截图获取摄像机朝向角度（0-360 度）。
+        """从截图获取摄像机朝向角度。
 
-        使用 CameraOrientationFromGia 算法:
-        1. 提取小地图区域
-        2. 转灰度
-        3. 极坐标展开 + Scharr + 峰值卷积 → 角度
+        优先走 avc ``IOrientationDetector``（BGI CameraOrientationFromGia 忠实移植，
+        小地图缓冲直传）；无 avc 时回退纯 Python ``compute_orientation``（同算法）。
+        输出为 BGI 原始角度约定（0=右/东，顺时针，实际取值 [45,360]），
+        与 ``target_orientation``（0=北，逆时针）的换算待实机标定。
         """
         if frame is None:
             frame = self.ctx.capture()
         if frame is None:
             return None
+        od = self._get_od()
+        if od is not None:
+            minimap = self._extract_minimap_buffer(frame)
+            if minimap is None:
+                return None
+            ang = od.compute(minimap)
+            return ang if ang >= 0 else None
+        # 回退: 无 avc → 纯 Python（同款 BGI 峰卷积）
+        gray = self._extract_minimap_gray(frame)
+        if gray is None:
+            return None
+        return compute_orientation(gray)
 
-        minimap = self._extract_minimap(frame)
-        if minimap is None:
+    def _get_od(self):
+        """懒建 avc IOrientationDetector（无 avc/插件未装返回 None）。"""
+        if self._od is not None:
+            return self._od
+        try:
+            from avc import Vision
+
+            od = Vision.createOrientationDetector()
+            self._od = od
+            return od
+        except Exception:
             return None
 
-        return compute_orientation(minimap)
-
-    def _extract_minimap(self, frame: IImageBuffer) -> np.ndarray | None:
-        """从完整截图裁剪小地图区域，返回灰度 numpy 数组。"""
+    def _extract_minimap_buffer(self, frame: IImageBuffer) -> IImageBuffer | None:
+        """裁剪小地图区域，返回 avc IImageBuffer（供 avc IOrientationDetector 直传）。"""
         try:
             from avc import Image
 
-            cropped = Image.crop(frame, MINIMAP_X, MINIMAP_Y, MINIMAP_W, MINIMAP_H)
-            if cropped is None:
-                return None
-            # IImageBuffer → numpy (BGRA8)
+            return Image.crop(frame, MINIMAP_X, MINIMAP_Y, MINIMAP_W, MINIMAP_H)
+        except Exception:
+            return None
+
+    def _extract_minimap_gray(self, frame: IImageBuffer) -> np.ndarray | None:
+        """回退用：裁剪小地图 → 灰度 numpy（喂纯 Python compute_orientation）。"""
+        cropped = self._extract_minimap_buffer(frame)
+        if cropped is None:
+            return None
+        try:
             raw = cropped.to_bytes()
             if raw is None:
                 return None
@@ -221,8 +247,7 @@ class CameraControl:
                 (MINIMAP_H, MINIMAP_W, 4),
             )
             # BGRA → 灰度
-            gray = cv2.cvtColor(arr, cv2.COLOR_BGRA2GRAY)
-            return gray
+            return cv2.cvtColor(arr, cv2.COLOR_BGRA2GRAY)
         except Exception:
             return None
 

@@ -233,6 +233,28 @@ def test_missing_required_param_raises():
 
 # ── runner ──
 
+def test_notify_pub_sub():
+    """notify 发布订阅：注册 handler 收到 (event, fields)。"""
+    from framework import notify as N
+
+    received = []
+    N.register(lambda event, fields: received.append((event, fields.get("task"))))
+    N.notify("task_start", task="auto_boss")
+    N.notify("task_end", task="auto_boss", normal_end=True)
+    assert ("task_start", "auto_boss") in received
+    assert ("task_end", "auto_boss") in received
+
+
+def test_notify_error_fields():
+    """task_error 带 error 字段。"""
+    from framework import notify as N
+
+    received = []
+    N.register(lambda event, fields: received.append(fields.get("error")))
+    N.notify("task_error", task="x", error="Timeout")
+    assert "Timeout" in received
+
+
 _TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

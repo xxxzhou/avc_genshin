@@ -16,5 +16,8 @@ res.template("daily/katherine.png")   # resources/templates/...
 res.model("bgi_world.onnx")           # resources/models/...，缺失则回退 BGI_ROOT
 ```
 
-> 大文件（models/map/ocr）已在 `.gitignore`；设 `BGI_ROOT` 环境变量指向本地
-> BetterGI 仓库即可零拷贝复用其模型/全地图（`docs/design/03 §5.2`）。
+> 大文件（models/map/ocr）已在 `.gitignore`。两种获取方式（`docs/design/03 §5.2`）：
+> - **脚本获取**：`python script/fetch_resources.py --list`（清单 `script/resources_manifest.json`，
+>   从 BGI release 7z 按需提取，下载一次缓存到 `cache/bgi_release/`）。
+> - **本地复用**：设 `BGI_ROOT` 指向本地 BetterGI **安装/解压目录**（含 `Assets/`），
+>   `python script/fetch_resources.py --all --bgi-root <路径>` 直接 copy 免下载。

@@ -130,6 +130,7 @@ avc_genshin/
 python main.py                         # 交互式：输入意图
 python main.py --intent "完成日常"      # 单次意图
 python main.py --task daily_quest      # 直接跑已注册任务
+python main.py --task verify           # 游戏内诊断（实机标定入口，见任务进度.md「实机测试指南」）
 ```
 依赖：`avc`（C++ SDK，需先构建）、`onnxruntime`、`numpy`、`opencv-python`、`anthropic`。
 

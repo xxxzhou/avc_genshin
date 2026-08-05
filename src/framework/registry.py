@@ -91,7 +91,7 @@ class TaskRegistry:
         from framework.sandbox import exec_sandboxed
 
         code = path.read_text(encoding="utf-8")
-        env = exec_sandboxed(code)  # AST 白名单 + 受限 globals
+        env = exec_sandboxed(code, extras=_ephemeral_extras())  # AST 白名单 + 受限 globals + 注入工具
         main = env.get("main")
         return main, None  # 即时任务降级形态：无 @task，由 _load_file 推断
 
@@ -142,3 +142,22 @@ class TaskRegistry:
     @property
     def warnings(self) -> list[str]:
         return list(self._warnings)
+
+
+def _ephemeral_extras() -> dict[str, Any]:
+    """即时任务注入的工具（沙箱禁 import，工具靠注入；与 sandbox.py 文档承诺一致）。
+
+    注入：``sleep`` / ``wait_until``（framework.utils）+ ``KeyCode`` / ``MouseButton``
+    （avc，无 avc 时跳过——即时任务运行本就需 avc）。
+    """
+    from framework import utils
+
+    extras: dict[str, Any] = {"sleep": utils.sleep, "wait_until": utils.wait_until}
+    try:
+        from avc._core import KeyCode, MouseButton
+
+        extras["KeyCode"] = KeyCode
+        extras["MouseButton"] = MouseButton
+    except Exception:
+        pass
+    return extras

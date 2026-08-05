@@ -314,12 +314,12 @@ def make_classifier(ctx: "GameContext") -> SceneClassifier:
         if has_in_domain(ctx, frame):
             return SceneState(scene=Scene.DOMAIN, confidence=0.9)
 
-        # 战斗：有血条+技能 UI 但不在对话/地图/秘境
-        # 简化判定：主界面 + 检测到敌人 → 战斗
-        # （精确战斗检测待 Phase C 的 fighter 能力）
+        # 战斗：主界面（派蒙菜单在）+ 屏幕上有血条 → COMBAT
         if has_paimon_menu(ctx, frame):
-            # 检测到敌人 → 战斗
-            # TODO: Phase C 接入 fighter.has_enemy()
+            from abilities.fighter import has_enemy_in_frame
+
+            if has_enemy_in_frame(frame):
+                return SceneState(scene=Scene.COMBAT, confidence=0.9)
             return SceneState(scene=Scene.MAIN_UI, confidence=0.9)
 
         # 菜单/其他：有关闭按钮但不在上述场景

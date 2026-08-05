@@ -115,6 +115,7 @@ class PathExecutor:
     def __init__(self, ctx: GameContext, g: HighLevelApi):
         self.ctx = ctx
         self.g = g
+        self.warnings: list[str] = []  # 未处理的 action 等，非致命
 
     def execute(self, task: PathTask) -> None:
         """执行路径任务。按传送点分段，逐段传送+行走。"""
@@ -131,9 +132,41 @@ class PathExecutor:
             # 首点为传送
             if segment[0].type == "teleport":
                 teleporter.teleport_to((segment[0].x, segment[0].y))
-            # 行走剩余路径点
+            # 行走剩余路径点（move_mode 传给 Navigator：fly 先跳起 / climb 跳过卡死）
             for wp in segment[1:]:
                 navigator.go_to(wp)
+                self._handle_action(wp)
+
+    def _handle_action(self, wp: Waypoint) -> None:
+        """路径点 action 处理（对照 BGI PathExecutor Handler，简化骨架）。
+
+        未实现的 action 记 ``warnings`` 不阻断（骨架；实机按需补）。stop_flying
+        用"到点后按空格落地"的简化，精确时机（BGI 是前移处理器）待实机验证。
+        """
+        action = (wp.action or "").strip()
+        if not action:
+            return
+        try:
+            from avc._core import KeyCode
+        except Exception:  # 无 avc：按键动作跳过（测试/降级）
+            KeyCode = None
+        if action == "stop_flying":
+            if KeyCode is not None:
+                self.g.press(KeyCode.space)  # 落地（实机验证空格退出滑翔）
+        elif action == "fight":
+            self.g.fight_until_clear(timeout=120)
+        elif action in ("pick_up", "collect"):
+            if KeyCode is not None:
+                self.g.press(KeyCode.f)  # 拾取/采集（同交互键）
+        elif action == "use_gadget":
+            if KeyCode is not None:
+                self.g.press(KeyCode.z)  # 快捷使用道具（王树瑞佑等）
+        elif action == "force_tp":
+            pass  # teleport 段首已处理
+        else:
+            self.warnings.append(
+                f"未处理 action={action!r} @({wp.x:.1f},{wp.y:.1f})"
+            )
 
     @staticmethod
     def _split_by_teleport(waypoints: tuple[Waypoint, ...]) -> list[list[Waypoint]]:

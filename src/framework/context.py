@@ -10,10 +10,19 @@
   ``Image.IImageBuffer(native)`` 包一层才有 ``to_bytes()`` / ``crop()``。
 - ``ic.click`` 用三参形式 ``click(x, y, MouseButton.left)``（非 ``click(x, y)``）。
 - 拟人化由**框架层**实现（avc 无 setHumanize，见 utils.py 说明）。
+
+DPI / 窗口边框归一化：
+- avc 截图拿到的是**整个窗口含边框**（如 1926×1156），``sc.width/height`` 报 DPI
+  缩放后的逻辑尺寸（如 781×467），两者都不等于游戏画面 1920×1080。
+- ``capture()`` 自动裁掉窗口边框，返回纯 1080p 游戏画面 buffer，下游零改动。
+- ``to_screen()`` 把 1080p buffer 坐标加回边框偏移后转屏幕坐标。
+- 初始化时用 Win32 API 算出边框偏移和 DPI 缩放比。
 """
 
 from __future__ import annotations
 
+import ctypes
+import sys
 from typing import TYPE_CHECKING
 
 from framework import utils
@@ -65,26 +74,55 @@ class GameContext:
         self.ic.setMoveSteps(self.cfg.move_steps)
         self.ic.setKeyDelayMs(self.cfg.key_delay_ms)
 
-        # ── 启动分辨率检查（CLAUDE §8：必须 1920×1080）──
-        self.cfg.check_resolution(self.sc.width(), self.sc.height())
+        # ── DPI / 窗口边框归一化 ──
+        self._border_left: int = 0   # 窗口左边框像素（buffer 坐标系）
+        self._border_top: int = 0    # 窗口标题栏+上边框像素（buffer 坐标系）
+        self._dpi_scale: float = 1.0  # Windows DPI 缩放比（如 2.5 = 250%）
+        self._calc_window_offsets(window_title)
+
+        # ── 启动分辨率检查（CLAUDE §8：游戏画面须 ≥ 1920×1080）──
+        # 用 buffer 实际像素检查（ib.width/height），不用 sc.width/height（DPI 缩放后）
+        nb = self.sc.getBuffer()
+        if nb:
+            ib = Image.IImageBuffer(nb)
+            self.cfg.check_resolution(ib.width, ib.height)
+        else:
+            # 无 buffer 时回退 sc.width/height
+            self.cfg.check_resolution(self.sc.width(), self.sc.height())
 
     # ── 截图 ──
 
     def capture(self) -> IImageBuffer | None:
-        """刷新并取最新一帧。返回高层 IImageBuffer（有 to_bytes/crop/save），失败 None。
+        """刷新并取最新一帧，裁掉窗口边框，返回纯 1080p 游戏画面 buffer。
 
-        注意：底层 ``sc.getBuffer()`` 返回原生借用 buffer，生命周期归 sc；
-        下次 refresh 前用完。这里包成高层 IImageBuffer 以获得便利方法。
+        avc 截图拿到整个窗口含边框（如 1926×1156），这里自动裁掉边框，
+        返回纯游戏画面（1920×1080），下游代码无需关心 DPI/边框。
+        无边框偏移时（1080p 原生屏）直接返回原始 buffer。
         """
         self.sc.refresh()
         nb = self.sc.getBuffer()
         if not nb:
             return None
-        return self._Image.IImageBuffer(nb)
+        ib = self._Image.IImageBuffer(nb)
+        # 裁掉窗口边框，归一化到纯游戏画面
+        if self._border_left > 0 or self._border_top > 0:
+            want_w, want_h = self.cfg.resolution
+            try:
+                cropped = self._Image.crop(
+                    ib, self._border_left, self._border_top, want_w, want_h
+                )
+                if cropped is not None:
+                    return cropped
+            except Exception:
+                pass  # crop 失败回退原始 buffer
+        return ib
 
     def to_screen(self, buf_x: float, buf_y: float) -> tuple[int, int]:
-        """截图缓冲坐标 → 屏幕坐标。"""
-        sp = self.sc.toScreen(int(buf_x), int(buf_y))
+        """1080p buffer 坐标 → 屏幕坐标（加回边框偏移后经 sc.toScreen 转换）。"""
+        # buffer 坐标是裁剪后的 1080p 坐标，需加回边框偏移才能对应原始 buffer
+        wx = int(buf_x) + self._border_left
+        wy = int(buf_y) + self._border_top
+        sp = self.sc.toScreen(wx, wy)
         return sp.x, sp.y
 
     def save_debug(self, path: str) -> None:
@@ -171,3 +209,69 @@ class GameContext:
                 self.ic.keyUp(k)
             except Exception:
                 pass
+
+    # ── DPI / 窗口边框计算 ──
+
+    def _calc_window_offsets(self, window_title: str) -> None:
+        """用 Win32 API + avc buffer 实际像素 计算窗口边框偏移和 DPI 缩放比。
+
+        avc 截图 buffer 包含整个窗口（含标题栏+边框），但下游代码需要纯游戏画面。
+        这里算出边框在 buffer 中的像素偏移，供 capture() 裁剪和 to_screen() 坐标转换。
+
+        计算逻辑：
+        1. ib.width/height → buffer 实际像素尺寸（含边框，不受 DPI 影响）
+        2. GetClientRect → 客户区逻辑尺寸（DPI 缩放后）
+        3. GetDpiForWindow → DPI 缩放比
+        4. 客户区真实像素 = ClientRect × DPI/96
+        5. border_left = (buffer_width - client_real_width) // 2
+        6. border_top = buffer_height - client_real_height - border_left
+           （假设左右边框等宽，底边框=左右边框）
+
+        ⚠ 不能用 GetWindowRect 算：DPI 缩放下它返回逻辑像素，不是真实像素。
+        非 Windows 平台或找不到窗口时保持默认值 0（无边框偏移）。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            user32 = ctypes.windll.user32
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            hwnd = user32.FindWindowW(None, window_title)
+            if not hwnd:
+                return
+
+            # DPI 缩放比
+            dpi = user32.GetDpiForWindow(hwnd)
+            if dpi > 0:
+                self._dpi_scale = dpi / 96.0
+
+            # buffer 实际像素尺寸（含边框）
+            nb = self.sc.getBuffer()
+            if not nb:
+                return
+            ib = self._Image.IImageBuffer(nb)
+            buf_w, buf_h = ib.width, ib.height
+
+            # 客户区逻辑尺寸 → 真实像素
+            cli_rect = RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(cli_rect))
+            cli_real_w = int(cli_rect.right * self._dpi_scale)
+            cli_real_h = int(cli_rect.bottom * self._dpi_scale)
+
+            # 边框偏移（buffer 坐标系 = 真实像素）
+            # 左右边框等宽，底边框=左右边框
+            border_h = (buf_w - cli_real_w) // 2
+            border_v_top = buf_h - cli_real_h - border_h
+
+            if border_h >= 0 and border_v_top >= 0:
+                self._border_left = border_h
+                self._border_top = border_v_top
+        except Exception:
+            pass  # Win32 API 失败时保持默认值 0

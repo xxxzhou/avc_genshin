@@ -19,6 +19,10 @@ resources/ocr/
 # resources/templates/
 # resources/paths/
 
+# ── 真实画面黄金测试截图（实机截屏，不进 git；保留 .gitkeep / *.example）──
+tests/fixtures/screens/*.png
+tests/fixtures/screens/*.json
+
 # ── 运行产物（docs/design/03 §3）──
 logs/
 debug/

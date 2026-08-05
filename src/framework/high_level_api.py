@@ -93,10 +93,6 @@ class HighLevelApi:
         dets = self.runtime.shared.detections
         return dets.get(cls, []) if cls else dets
 
-    def has_enemy(self) -> bool:
-        # 占位：检测到任意物体视为可能有敌（精确分类待模型类别细分）
-        return any(v for v in self.runtime.shared.detections.values())
-
     # ── 世界模型（06）──
 
     def set_flag(self, key: str, val: Any) -> None:
@@ -299,6 +295,55 @@ class HighLevelApi:
         _skip(self.ctx, timeout)
         self._observe("action", action="talk_skip")
 
+    # ── 战斗（领域能力，Phase C）──
+
+    def has_enemy(self) -> bool:
+        """即时血条检测（红色色块）。不读 shared.detections（bgi_world 是否含稳定
+        “敌人”类未验证）；血条是战斗专属可靠信号。详见 abilities/fighter.py。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        return self._call(_run(fighter.has_enemy), timeout=10)
+
+    def find_nearest_enemy(self):
+        """最近敌人（血条框，截图缓冲坐标系），无则 None。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        return self._call(_run(fighter.find_nearest_enemy), timeout=10)
+
+    def is_q_ready(self) -> bool:
+        """Q（元素爆发）是否就绪（q_classify 分类 Q 图标 ROI）。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        return self._call(_run(fighter.is_q_ready), timeout=15)  # 首次懒加载 ONNX，给足
+
+    def fight(self, duration_s: float = 30, rotation: list | None = None) -> None:
+        """站桩连招（阻塞 duration_s 或敌人清场）。rotation 见 fighter.DEFAULT_ROTATION。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        self._call(self._fight_coro(fighter, duration_s, rotation), timeout=duration_s + 15)
+
+    async def _fight_coro(self, fighter, duration_s, rotation):
+        fighter.fight(duration_s, rotation)
+        self._observe("action", action="fight", duration=duration_s)
+
+    def fight_until_clear(self, timeout: float = 120) -> bool:
+        """战斗到清场（has_enemy 持续 False）或超时。返回是否清场完成。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        return self._call(
+            self._fight_until_clear_coro(fighter, timeout), timeout=timeout + 30
+        )
+
+    async def _fight_until_clear_coro(self, fighter, timeout):
+        result = fighter.fight_until_clear(timeout=timeout)
+        self._observe("action", action="fight_until_clear", cleared=result)
+        return result
+
     # ── 运行时控制（委托 Runtime；ctx 也提供同名方法，04 §10）──
 
     def mount(self, name: str, **opts) -> None:
@@ -314,8 +359,8 @@ class HighLevelApi:
         self.runtime.resume_all()
 
     def run(self, name: str, **params):
-        """任务组合（ctx.run 同义；阶段四 Registry 落地）。"""
-        raise NotImplementedError("ctx.run 需任务体系（阶段四：@task + Registry）")
+        """任务组合（与 ctx.run 同义，委托 Runtime._run_inline；阶段四已落地）。"""
+        return self.ctx.run(name, **params)
 
     # ── 决策（预留，后置）──
 
