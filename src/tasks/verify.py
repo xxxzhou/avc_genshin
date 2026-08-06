@@ -1,25 +1,24 @@
-"""verify —— 游戏内诊断任务（供实机验证/标定，Phase D 配套）。
+"""verify —— 游戏内诊断任务（供实机验证/标定）。
 
 进游戏后跑一遍各能力，逐项打印结果，一眼看出"哪些 OK / 哪些该调参"。
 **默认只读**（不点击/不移动/不战斗）；``do_teleport=True`` 才会真传送（会移动角色）。
 
 用法：``python main.py --task verify``（默认只读）
      ``python main.py --task verify do_teleport=true waypoint=七天神像-风``（测传送链）
-
-每项探测独立 try/except：一项失败不中断其余，错误以 ``ERR 类型: 信息`` 记录，
-方便在实机上看具体卡在哪。打印结果也写入任务返回（JSONL task_return）。
+     ``python main.py --task verify --window 计算器``（在任意窗口上验证截图链路）
 """
 
 from __future__ import annotations
+
+import time
 
 from framework import task
 
 
 @task(
     name="verify",
-    desc="游戏内诊断：逐项探测 场景/传送/定位/朝向/敌人/Q/OCR 并打印，供实机标定。默认只读。",
+    desc="游戏内诊断：逐项探测 截图/场景/定位/朝向/敌人/Q/OCR 并打印，供实机标定。默认只读。",
     daemons=["frame", "scene_estimator"],
-    requires=["navigation", "fighter"],
     params={
         "waypoint": {
             "type": "str",
@@ -41,10 +40,6 @@ from framework import task
 )
 def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, do_ocr: bool = True) -> dict:
     """逐项探测并打印。返回 ``{"results": {探测名: 结果串}}``。"""
-    from abilities.navigation.camera import CameraControl
-    from abilities.navigation.position import PositionGetter
-    from abilities.navigation.tp import TpDatabase
-
     results: dict[str, str] = {}
 
     def probe(name: str, fn) -> None:
@@ -55,13 +50,53 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         except Exception as e:  # noqa: BLE001 — 诊断任务要吞掉所有异常逐个报告
             results[name] = f"ERR {type(e).__name__}: {e}"
 
-    # ── 1. 场景 ──
+    # ── 1. 截图基础 ──
+    probe("capture", lambda: _capture_info(ctx))
+
+    # ── 2. 截图速率 ──
+    def _fps():
+        N = 10
+        t0 = time.perf_counter()
+        for _ in range(N):
+            ctx.capture()
+        t1 = time.perf_counter()
+        return f"{N / (t1 - t0):.1f} fps ({N} frames in {t1 - t0:.2f}s)"
+    probe("capture_fps", _fps)
+
+    # ── 3. SourcePlayer 状态 ──
+    probe("source_player", lambda: "active" if ctx._player is not None else "fallback (IScreenCapture)")
+
+    # ── 4. 场景检测 ──
+    def _scene_detect():
+        from abilities import game_state as gs
+        frame = ctx.capture()
+        if frame is None:
+            return "capture None"
+        checks = {
+            "paimon_menu": gs.has_paimon_menu,
+            "in_domain": gs.has_in_domain,
+            "disabled_ui": gs.has_disabled_ui_btn,
+            "map_scale_btn": gs.has_map_scale_btn,
+            "map_settings_btn": gs.has_map_settings_btn,
+            "map_close_btn": gs.has_map_close_btn,
+        }
+        found = []
+        for name, fn in checks.items():
+            try:
+                if fn(ctx, frame):
+                    found.append(name)
+            except Exception as e:
+                found.append(f"{name}(ERR:{e})")
+        return found if found else "none detected"
+    probe("scene_detect", _scene_detect)
+
+    # ── 5. 场景分类器 ──
     probe("scene", lambda: g.scene.scene.name if g.scene and g.scene.scene else None)
     probe("is_loading", lambda: g.is_loading())
-    probe("wait_main_ui(10s)", lambda: g.wait_main_ui(timeout=10))
 
-    # ── 2. 传送（默认只查名，不真传）──
+    # ── 6. 传送（默认只查名，不真传）──
     def _tp_lookup():
+        from abilities.navigation.tp import TpDatabase
         p = TpDatabase().find_by_name(waypoint)
         return f"{waypoint!r} → {p.name if p else '未找到（名字不在 tp.json / 非 Teyvat）'}"
     probe("tp_lookup", _tp_lookup)
@@ -69,13 +104,29 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         probe("teleport_to", lambda: g.teleport_to(waypoint))
         probe("after_tp_wait_main_ui", lambda: g.wait_main_ui(timeout=30))
 
-    # ── 3. 定位（小地图 SIFT ↔ 256 地图）──
-    probe("position", lambda: PositionGetter(ctx).get_position())
+    # ── 7. 定位 ──
+    def _position():
+        from abilities.navigation.position import PositionGetter
+        pg = PositionGetter(ctx)
+        # 全局匹配（无 prev_position）
+        global_pos = pg.get_position()
+        # 局部匹配（用传送锚点坐标做 prev_position）
+        from abilities.navigation.tp import TpDatabase
+        anchor = TpDatabase().find_by_name(waypoint)
+        if anchor is not None:
+            pg.set_prev_position(anchor.tran_x, anchor.tran_y)
+            local_pos = pg.get_position()
+            return f"global={global_pos}, local(prev={waypoint})={local_pos}"
+        return f"global={global_pos}, no anchor for local"
+    probe("position", _position)
 
-    # ── 4. 朝向（BGI 峰卷积；注意与 target_orientation 约定换算待标定）──
-    probe("orientation", lambda: CameraControl(ctx).get_orientation())
+    # ── 8. 朝向 ──
+    def _orientation():
+        from abilities.navigation.camera import CameraControl
+        return CameraControl(ctx).get_orientation()
+    probe("orientation", _orientation)
 
-    # ── 5. 敌人/血条（avc IColorDetector）──
+    # ── 9. 敌人/血条 ──
     probe("has_enemy", lambda: g.has_enemy())
     probe(
         "nearest_enemy",
@@ -84,10 +135,10 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         ),
     )
 
-    # ── 6. Q 就绪（q_classify 分类）──
+    # ── 10. Q 就绪 ──
     probe("is_q_ready", lambda: g.is_q_ready())
 
-    # ── 7. OCR（avc_ocr；奖励领用靠它认文案）──
+    # ── 11. OCR ──
     if do_ocr:
         def _ocr_boxes():
             ocr = getattr(ctx, "ocr", None)
@@ -96,7 +147,12 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             frame = ctx.capture()
             if frame is None:
                 return "capture None"
-            return f"{ocr.recognize(frame)} 个文字框"
+            n = ocr.recognize(frame)
+            texts = []
+            for i in range(n):
+                t, r = ocr.getMatch(i)
+                texts.append(f"{t!r}@({r.x:.0f},{r.y:.0f})")
+            return f"{n} 个文字框: {', '.join(texts[:10])}"
         probe("ocr_boxes", _ocr_boxes)
 
     # ── 打印 + 返回 ──
@@ -105,3 +161,13 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         print(f"  {k:24s} {v}")
     print("==============================")
     return {"results": results}
+
+
+def _capture_info(ctx) -> str:
+    """截图信息：尺寸 + SourcePlayer 状态。"""
+    frame = ctx.capture()
+    if frame is None:
+        return "capture returned None"
+    w, h = frame.width, frame.height
+    player = "SourcePlayer" if ctx._player is not None else "IScreenCapture"
+    return f"{w}x{h} via {player}"

@@ -82,7 +82,7 @@ def proto_detect(window: str, model: str) -> int:
     det = GenshinDetector(str(model_path))
     result = det.detect(buf)
     total = sum(len(v) for v in result.values())
-    print(f"[detect] 模型={model} task={det.task} imgsz={det.imgsz} 类别={det.names}")
+    print(f"[detect] 模型={model} task={det.task} 类别={det.names}")
     if not result:
         print("[detect] ✓ 推理完成，未检测到目标")
         return 0

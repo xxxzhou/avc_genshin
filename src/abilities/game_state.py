@@ -146,37 +146,42 @@ def _near_black_ratio(frame: "IImageBuffer", y_start: int = 0, y_end: int | None
 
 
 def has_paimon_menu(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
-    """主界面：左上角派蒙菜单图标（BGI ``IsInMainUi``）。"""
-    return _find_template(ctx, "paimon_menu", frame, roi=(0, 0, 200, 150))
+    """主界面：左上角派蒙菜单图标（BGI ``IsInMainUi``，ROI=topLeftQuarter）。"""
+    return _find_template(ctx, "paimon_menu", frame, roi=(0, 0, 480, 270))
 
 
 def has_disabled_ui_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
-    """对话中：左上角"自动"禁用按钮（BGI ``IsInTalkUi``）。"""
-    return _find_template(ctx, "disabled_ui", frame, roi=(0, 0, 200, 150))
+    """对话中：左上角"自动"禁用按钮（BGI ``IsInTalkUi``，ROI=AutoSkip 区域）。"""
+    return _find_template(ctx, "disabled_ui", frame, roi=(0, 0, 640, 135))
 
 
 def has_map_scale_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
-    """大地图：缩放按钮（BGI ``IsInBigMapUi``）。"""
-    return _find_template(ctx, "map_scale_btn", frame)
+    """大地图：缩放按钮（BGI ``IsInBigMapUi``，ROI=左侧窄条）。"""
+    return _find_template(ctx, "map_scale_btn", frame, roi=(30, 440, 40, 200))
 
 
 def has_map_settings_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
-    """大地图：设置按钮（BGI ``IsInBigMapUi`` 备选）。"""
-    return _find_template(ctx, "map_settings_btn", frame)
+    """大地图：设置按钮（BGI ``IsInBigMapUi`` 备选，ROI=左下角）。"""
+    return _find_template(ctx, "map_settings_btn", frame, roi=(25, 990, 58, 62))
+
+
+def has_map_close_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """大地图/可关闭 UI：关闭按钮（BGI ``IsInAnyClosableUi``，ROI=右上角）。"""
+    return _find_template(ctx, "map_close_btn", frame, roi=(1813, 19, 58, 58))
 
 
 def has_in_domain(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
-    """秘境内：右上角秘境图标（BGI ``IsInDomain``，需排除全白）。"""
-    if not _find_template(ctx, "in_domain", frame, roi=(1700, 0, 220, 100)):
+    """秘境内：左上角秘境图标（BGI ``IsInDomain``，ROI=topLeftQuarter，需排除全白）。"""
+    if not _find_template(ctx, "in_domain", frame, roi=(0, 0, 480, 270)):
         return False
     # BGI 逻辑：若匹配区域全白则视为不在秘境
     buf = frame if frame is not None else ctx.capture()
     if buf is None:
         return False
-    # 采样匹配区域中心几个点
+    # 采样左上 1/4 区域中心几个点（BGI 采样匹配区域内的 5 点）
     for dx, dy in [(0.5, 0.5), (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]:
-        px = 1700 + int(220 * dx)
-        py = int(100 * dy)
+        px = int(480 * dx)
+        py = int(270 * dy)
         b, g, r, _ = _pixel_bgra(buf, min(px, buf.width - 1), min(py, buf.height - 1))
         if not (b >= 240 and g >= 240 and r >= 240):
             return True  # 有非白像素 → 确实在秘境

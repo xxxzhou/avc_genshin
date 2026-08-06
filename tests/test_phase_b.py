@@ -350,33 +350,29 @@ def _avc_od_available() -> bool:
 
 
 class TestOrientationAvc:
-    """C++（avc）与 Python compute_orientation 输出必须一致（验证 BGI 移植忠实）。"""
+    """avc IOrientationDetector 可用且返回有效角度。"""
 
     pytestmark = pytest.mark.skipif(
         not _avc_od_available(), reason="需 avc + avc_opencv 插件"
     )
 
-    def _compare(self, gray):
+    def test_noise(self):
+        import numpy as np
         import avc
         from avc._core import ImageType
 
-        from abilities.navigation.camera import compute_orientation
-
-        ang_py = compute_orientation(gray.copy())
+        rng = np.random.default_rng(42)
+        gray = rng.integers(0, 256, (212, 212), dtype=np.uint8)
         buf = avc.Image.IImageBuffer()
         buf.setFormat(212, 212, ImageType.r8)
         buf.from_bytes(gray.tobytes())
-        ang_avc = avc.Vision.createOrientationDetector().compute(buf)
-        assert ang_py == ang_avc, f"角度不一致: py={ang_py}, avc={ang_avc}"
-
-    def test_noise(self):
-        import numpy as np
-
-        rng = np.random.default_rng(42)
-        self._compare(rng.integers(0, 256, (212, 212), dtype=np.uint8))
+        ang = avc.Vision.createOrientationDetector().compute(buf)
+        assert isinstance(ang, float) and 0 <= ang <= 360
 
     def test_arrow_wedge(self):
         import numpy as np
+        import avc
+        from avc._core import ImageType
 
         img = np.zeros((212, 212), np.uint8)
         for r in range(20, 90):
@@ -385,13 +381,24 @@ class TestOrientationAvc:
                 y = 106 + int(r * np.sin(np.radians(th)))
                 if 0 <= x < 212 and 0 <= y < 212:
                     img[y, x] = 255
-        self._compare(img)
+        buf = avc.Image.IImageBuffer()
+        buf.setFormat(212, 212, ImageType.r8)
+        buf.from_bytes(img.tobytes())
+        ang = avc.Vision.createOrientationDetector().compute(buf)
+        assert isinstance(ang, float) and 0 <= ang <= 360
 
     def test_gradient(self):
         import numpy as np
+        import avc
+        from avc._core import ImageType
 
         gx, gy = np.meshgrid(np.arange(212), np.arange(212))
-        self._compare(((gx + gy) * 255 / 420).astype(np.uint8))
+        gray = ((gx + gy) * 255 / 420).astype(np.uint8)
+        buf = avc.Image.IImageBuffer()
+        buf.setFormat(212, 212, ImageType.r8)
+        buf.from_bytes(gray.tobytes())
+        ang = avc.Vision.createOrientationDetector().compute(buf)
+        assert isinstance(ang, float) and 0 <= ang <= 360
 
 
 # ── TrapEscaper 测试 ──

@@ -2,8 +2,8 @@
 
 对照 BetterGI AutoFight（``GameTask/AutoFight/``），借鉴其视觉策略，摒弃脚本引擎/复杂调度：
 
-- **敌人检测 = 红色血条色块**（``AvatarRecognition.FindBloodBars``）：``cv2.inRange``
-  RGB(255,90,90) 精确匹配 + ``connectedComponents``。不用 bgi_world YOLO（其是否含稳定
+- **敌人检测 = 红色血条色块**（``AvatarRecognition.FindBloodBars``）：avc ``IColorDetector``
+  BGR(255,90,90) 精确匹配 + 连通域（下沉 avc_opencv）。不用 bgi_world YOLO（其是否含稳定
   “敌人”类未验证）；血条是战斗专属的可靠信号。
 - **Q 就绪** = ``q_classify_sim.onnx``（ROI 右下 Q 图标，类别含 ``"energy 1 cd 0"``）。
 - **角色识别** = ``avatar_side_classify_sim.onnx``（右侧侧栏 4 头像）。
@@ -20,9 +20,6 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING
-
-import cv2
-import numpy as np
 
 from abilities.detector import GenshinDetector
 from abilities.vision_utils import Rect
@@ -203,20 +200,20 @@ class SimpleFighter:
         return base or None
 
     def _active_slot_index(self) -> int | None:
-        """AvatarIndexRectList 4 个编号块里第一个“非白”= 出战槽；全白返回 None。"""
+        """AvatarIndexRectList 4 个编号块里第一个“非白”= 出战槽；全白返回 None。
+
+        avc：``toGray`` → 各 ROI ``countInRange``(灰度∈[lo,hi] 占比)。
+        """
         frame = self.ctx.capture()
         if frame is None:
             return None
-        bgr = _buffer_to_bgr(frame)
-        if bgr is None:
+        gray = frame.toGray()
+        if gray is None:
             return None
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         lo, hi = _INDEX_WHITE_GRAY
-        for i, (x, y, w, h) in enumerate(_AVATAR_INDEX_ROIS):
-            block = gray[y : y + h, x : x + w]
-            # 白块占比 = 灰度落在 [lo, hi] 的像素比例（BGI CountGrayMatColor(251,255)）
-            white_ratio = float(((block >= lo) & (block <= hi)).sum()) / block.size
-            if white_ratio < _INDEX_WHITE_RATIO:
+        for i, roi in enumerate(_AVATAR_INDEX_ROIS):
+            # 白块占比（BGI CountGrayMatColor(251,255)）；countInRange 返回 [0,1]
+            if gray.countInRange(roi, lo, hi) < _INDEX_WHITE_RATIO:
                 return i
         return None
 
@@ -478,128 +475,63 @@ class SimpleFighter:
     ) -> tuple[str, float]:
         """对 frame 的 roi 区域做分类，返回 (类名, 分数)。
 
-        ⚠️ 不用 ``clf.classify``（其 ``_preprocess`` 用 letterbox，会给分类图加黑边，
-        与 BGI YoloSharp ``Classify`` 的「精确 resize」训练分布不一致，置信度可能偏低）。
-        这里直接 resize 到 imgsz×imgsz 再推理（/255 + NCHW + argmax）。
+        avc：``frame.crop`` 得 IImageBuffer → ``clf.classify``（avc ``classify`` 用
+        exact resize，对齐 BGI YoloSharp ``Classify`` 训练分布）。
         """
         frame = self.ctx.capture()
         if frame is None:
             return "", 0.0
-        bgr = _buffer_to_bgr(frame)
-        if bgr is None:
+        crop = frame.crop(*roi)
+        if crop is None:
             return "", 0.0
-        x, y, w, h = roi
-        crop = bgr[y : y + h, x : x + w]
-        rgb = crop[:, :, ::-1]
-        resized = cv2.resize(rgb, (clf.imgsz, clf.imgsz), interpolation=cv2.INTER_LINEAR)
-        tensor = np.ascontiguousarray(
-            resized.astype(np.float32).transpose(2, 0, 1)[None] / 255.0
-        )
-        out = clf.session.run([clf.out_name], {clf.in_name: tensor})[0].flatten()
-        top = int(out.argmax())
-        return clf.name(top), float(out[top])
+        return clf.classify(crop)
 
 
 # ── 模块级纯函数（供 game_state.py 单向 import，避免类循环依赖）──
 
 
 def detect_blood_bars(frame: "IImageBuffer") -> list[Rect]:
-    """frame → 血条框列表（截图缓冲坐标系）。
+    """frame（avc IImageBuffer）→ 血条框列表（截图缓冲坐标系）。
 
-    优先走 avc ``IColorDetector``（C++，下沉到 avc_opencv；运行时 frame 为 avc
-    ``IImageBuffer``）；无 avc / 插件未装 / frame 非 avc buffer（如单测 FakeBuffer）时
-    回退纯 cv2。两侧逻辑等价：``inRange``(血条色) + 连通域 + 过滤(面积/左侧 UI)。
-    ⚠ avc 侧 8-连通、cv2 侧 4-连通；对血条这种孤立横条几乎无差别。
+    avc ``IColorDetector``（avc_opencv；BGR ``inRange``(255,90,90) 精确匹配 + 8-连通
+    + setMinArea/setRoi + 左侧 UI 过滤）。avc 是硬依赖，不回退 cv2。
     """
     cd = _get_blood_detector()
-    if cd is not None and hasattr(frame, "_native"):
-        out: list[Rect] = []
-        for i in range(cd.detect(frame)):
-            r = cd.getRegion(i)
-            if r is None:
-                continue
-            if r.x <= _BLOOD_EXCLUDE_X:  # 排除左侧 UI（队伍头像红边）
-                continue
-            out.append(Rect(r.x, r.y, r.w, r.h))
-        return out
-    return _detect_blood_bars_cv2(frame)
+    out: list[Rect] = []
+    for i in range(cd.detect(frame)):
+        r = cd.getRegion(i)
+        if r is None or r.x <= _BLOOD_EXCLUDE_X:  # 排除左侧 UI（队伍头像红边）
+            continue
+        out.append(Rect(r.x, r.y, r.w, r.h))
+    return out
 
 
-_BLOOD_CD = None  # 懒建的 avc IColorDetector（无 avc / 插件未装则保持 None）
+_BLOOD_CD = None  # 懒建的 avc IColorDetector
 
 
 def _get_blood_detector():
     """懒建并缓存 avc ``IColorDetector``（配好血条色/ROI/minArea）。
 
-    无 avc 或 avc_opencv 插件未加载时返回 None（调用方回退到纯 cv2）。
-    血条 RGB(255,90,90) → BGR(90,90,255)，精确匹配（BGI 单标量阈值 low==high）。
+    avc 是硬依赖：``avc_opencv`` 插件未加载 → raise（不回退 cv2）。血条
+    RGB(255,90,90) → BGR(90,90,255)，精确匹配（BGI 单标量阈值 low==high）。
     """
     global _BLOOD_CD
     if _BLOOD_CD is not None:
         return _BLOOD_CD
-    try:
-        from avc import Vision
-        from avc._core import ColorSpace
+    from avc import Vision
+    from avc._core import ColorSpace
 
-        cd = Vision.createColorDetector()
-        if cd is None:  # avc_opencv 插件未加载 → 降级
-            return None
-        cd.setColorSpace(ColorSpace.bgr)
-        cd.setRange(90, 90, 255, 90, 90, 255)  # BGR; 精确匹配
-        cd.setRoi(*_BLOOD_ROI)
-        cd.setMinArea(_BLOOD_MIN_AREA)
-        _BLOOD_CD = cd
-        return cd
-    except Exception:
-        return None
-
-
-def _detect_blood_bars_cv2(frame: "IImageBuffer") -> list[Rect]:
-    """纯 Python cv2 回退（无 avc 时；逻辑同 avc 侧，4-连通）。
-
-    BGI ``AvatarRecognition.FindBloodBars`` 的 Python 等价：
-    BGRA→BGR→RGB → ``inRange(RGB(255,90,90), RGB(255,90,90))`` 精确匹配
-    → ``connectedComponentsWithStats`` → 过滤（面积/左侧 UI）。
-    """
-    bgr = _buffer_to_bgr(frame)
-    if bgr is None:
-        return []
-    x0, y0, rw, rh = _BLOOD_ROI
-    roi = bgr[y0 : y0 + rh, x0 : x0 + rw]
-    rgb = roi[:, :, ::-1]
-    mask = cv2.inRange(
-        rgb, np.array(_BLOOD_RGB, dtype=np.uint8), np.array(_BLOOD_RGB, dtype=np.uint8)
-    )
-    n, _labels, stats, _cent = cv2.connectedComponentsWithStats(
-        mask, connectivity=4, ltype=cv2.CV_32S
-    )
-    out: list[Rect] = []
-    for i in range(1, n):  # 0 是背景
-        x, y, w, h, area = stats[i]
-        if area < _BLOOD_MIN_AREA:
-            continue
-        gx, gy = int(x) + x0, int(y) + y0  # 还原到全图坐标
-        if gx <= _BLOOD_EXCLUDE_X:  # 排除左侧 UI（队伍头像红边）
-            continue
-        out.append(Rect(gx, gy, int(w), int(h)))
-    return out
+    cd = Vision.createColorDetector()
+    if cd is None:
+        raise RuntimeError("avc IColorDetector 不可用（avc_opencv 插件未加载）；不回退 cv2。")
+    cd.setColorSpace(ColorSpace.bgr)
+    cd.setRange(90, 90, 255, 90, 90, 255)  # BGR; 精确匹配
+    cd.setRoi(*_BLOOD_ROI)
+    cd.setMinArea(_BLOOD_MIN_AREA)
+    _BLOOD_CD = cd
+    return cd
 
 
 def has_enemy_in_frame(frame: "IImageBuffer") -> bool:
     """帧内是否有血条（供 SceneEstimator / game_state 判 COMBAT 场景用）。"""
     return bool(detect_blood_bars(frame))
-
-
-def _buffer_to_bgr(frame) -> np.ndarray | None:
-    """avc IImageBuffer（默认 BGRA8）→ HxWx3 BGR ndarray；失败 None。
-
-    avc 截图默认 BGRA8（CLAUDE §5）；取前 3 通道即 BGR。不借 detector._to_rgb_np
-    以保持解耦（后者按 imageType 分派，这里按默认格式简化）。
-    """
-    try:
-        raw = bytes(frame.to_bytes())
-        h, w = frame.height, frame.width
-        arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, -1)
-        return arr[:, :, :3]
-    except Exception:
-        return None

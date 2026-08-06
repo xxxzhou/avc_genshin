@@ -23,26 +23,18 @@ def _has_avc() -> bool:
         return False
 
 
-# ── Fake frame（模拟 avc IImageBuffer，BGRA8）──
-
-
-class FakeBuffer:
-    """模拟 avc IImageBuffer：``to_bytes`` + ``width`` + ``height``。"""
-
-    def __init__(self, bgra: np.ndarray):
-        self._arr = bgra
-        self.height, self.width = bgra.shape[:2]
-
-    def to_bytes(self):
-        return self._arr.tobytes()
+# ── 合成 frame（真 avc IImageBuffer，BGRA8；喂 avc 检测器）──
 
 
 def _frame(bars=None, *, blocks=None, h=1080, w=1920):
-    """构造 fake frame。
+    """构造 avc IImageBuffer 合成帧。
 
     bars: [(x, y, bw, bh)] 放红色血条（RGB(255,90,90) = BGRA(90,90,255,255)）。
     blocks: {slot_idx: "white"|"active"} 设置 AvatarIndexRectList 编号块状态。
     """
+    from avc import Image
+    from avc._core import ImageType
+
     arr = np.zeros((h, w, 4), dtype=np.uint8)
     for (x, y, bw, bh) in (bars or []):
         arr[y : y + bh, x : x + bw] = (90, 90, 255, 255)
@@ -55,7 +47,10 @@ def _frame(bars=None, *, blocks=None, h=1080, w=1920):
                 arr[y : y + bh, x : x + bw] = (255, 255, 255, 255)
             else:  # active：彩色（灰度 ~124，远低于白阈值 251）
                 arr[y : y + bh, x : x + bw] = (50, 100, 200, 255)
-    return FakeBuffer(arr)
+    buf = Image.createImageBuffer()
+    buf.setFormat(w, h, ImageType.bgra8)
+    buf.from_bytes(arr.tobytes())
+    return buf
 
 
 class MockContext:

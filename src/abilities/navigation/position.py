@@ -24,14 +24,70 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from framework.resources import res
 
 if TYPE_CHECKING:
     from avc.image import IImageBuffer
+    from avc.vision import IMapMatcher
 
     from framework.context import GameContext
+
+
+@dataclass
+class _MapLayer:
+    """一个 MapBack 分层（粗匹配+精匹配+坐标转换）。
+
+    对照 BGI BaseMapLayerByTemplateMatch: LayerId/Left/Top/Scale +
+    CoarseColorMatcher (FastSqDiffMatcher) + FineGrayMap (Mat)。
+
+    坐标系（对照 BGI BaseMapLayerByTemplateMatch.WorldToMap/MapToWorld）：
+    - 图像坐标增大 → 游戏坐标减小（翻转）
+    - 粗匹配: game_x = Left - px * RoughZoom / Scale, RoughZoom=5
+    - 精匹配: game_x = Left - px * ExactZoom / Scale, ExactZoom=1
+    - IMapMatcher 返回的 (px, py) 已是中心坐标（MapMatcher.cpp 加了 coarseSize/2）
+    """
+
+    layer_id: str
+    left: float  # 世界坐标原点 X（mapback_info.json Left）
+    top: float  # 世界坐标原点 Y（mapback_info.json Top）
+    scale: float = 1.0  # 缩放（mapback_info.json Scale）
+    mm: IMapMatcher | None = field(default=None, repr=False)  # avc IMapMatcher 实例
+    # 覆盖范围（游戏坐标，从彩图尺寸 + BGI 翻转公式计算）
+    right: float = 0.0
+    bottom: float = 0.0
+
+    def contains(self, gx: float, gy: float) -> bool:
+        """游戏坐标是否在该层覆盖范围内。
+
+        BGI 翻转坐标系：px=0 → game=Left/Top（最大），px=width → game 最小。
+        所以 game_x 范围是 [left - width*zoom/scale, left]。
+        """
+        if self.right == self.left and self.bottom == self.top:
+            return True  # 无范围信息时不排除
+        # right < left（翻转），所以范围是 [right, left]
+        x_ok = min(self.right, self.left) <= gx <= max(self.right, self.left)
+        y_ok = min(self.bottom, self.top) <= gy <= max(self.bottom, self.top)
+        return x_ok and y_ok
+
+    def coarse_to_game(self, px: float, py: float) -> tuple[float, float]:
+        """coarseMap 像素坐标（中心）→ 游戏坐标。
+
+        对照 BGI MapToWorld: game_x = Left - (pos.X + miniMapSize/2) * zoom / Scale
+        IMapMatcher 返回的 px/py 已含 coarseSize/2 偏移，无需再加。
+        """
+        return (self.left - px * _ROUGH_ZOOM / self.scale,
+                self.top - py * _ROUGH_ZOOM / self.scale)
+
+    def game_to_coarse(self, gx: float, gy: float) -> tuple[float, float]:
+        """游戏坐标 → coarseMap 像素坐标（coarse_to_game 的逆）。
+
+        对照 BGI WorldToMap: map_x = (Left - pos.X) * Scale / zoom
+        """
+        return ((self.left - gx) * self.scale / _ROUGH_ZOOM,
+                (self.top - gy) * self.scale / _ROUGH_ZOOM)
 
 
 # ── 提瓦特地图参数（对照 BGI TeyvatMap.cs）──
@@ -67,29 +123,65 @@ MAP256_SCALE = MAP256_BLOCK_WIDTH / 1024.0  # 0.25 px/游戏单位
 # ── BGI 模板匹配资源路径 ──
 # 分层地图（对照 BGI BaseMapLayerByTemplateMatch.LoadLayers）
 _MAPBACK_DIR = "Assets/Map/Teyvat"
-_MAPBACK_INFO = "mapback_info.json"  # 分层信息 JSON
+_MAPBACK_INFO_FILES = ["mapback_info.json", "mapback_6_0_info.json"]  # 分层信息 JSON（MapBack_0~5）
 
 # 大图视口 ROI（大图打开时地图内容区，1080p；实机验证边界）
 _BIG_MAP_ROI = (0, 0, 1600, 900)
 
-# 局部匹配窗口半径（游戏单位，对齐 BGI 的 3×3 块邻域优化）
-_LOCAL_WINDOW_UNITS = 2000.0
+# 粗匹配局部搜索半径（color-px 单位，对照 BGI MiniMapMatchConfig.RoughSearchRadius=50）
+_ROUGH_SEARCH_RADIUS = 50
+
+# color-px → 世界单位（BGI: color webp 是 gray webp 的 1/5 缩略 → 1 color-px = 5 世界单位 at Scale=1）
+_COARSE_PIXEL_TO_WORLD = 5.0
+# BGI MiniMapMatchConfig: 粗匹配缩放比（color webp 相对 gray webp 的缩放倍数）
+_ROUGH_ZOOM = 5
+
+# ── 小地图预处理尺寸（BGI Process1：212 中心裁 156）──
+PROC_MINIMAP_SIZE = 156  # 裁后边长（朝向/掩码/匹配统一用此尺寸）
+_PROC_CENTER = PROC_MINIMAP_SIZE // 2  # 78
+
+# ── BGI 掩码参数（上层视觉特征，留在 avc_genshin；对照 MiniMapPreprocessor/MaskCalculator）──
+# 扇形：玩家朝向背后可见区 (排除正前方 ~91° UI/箭头)；angle 为 IOrientationDetector 输出 (0=东, 顺时针)
+# 半轴用 int：buildSectorMask 的 rx/ry 是 int32_t，传 float 会被 SWIG 拒 (TypeError)
+_MASK_SECTOR_HALF = PROC_MINIMAP_SIZE  # 椭圆半轴（满尺寸 → 整圆扇形）
+_MASK_SECTOR_BACK = 45.5  # 朝向后偏移 (度)
+_MASK_SECTOR_FRONT = 314.5  # 朝向前截止 (度)；arc = FRONT-BACK ≈ 269°
+_MASK_CIRCLE_RADIUS = _PROC_CENTER  # 78：圆形裁剪半径
+# 黄绿任务箭头 BGR 范围 (BGI)
+_MASK_BG_LO = (165, 165, 55)
+_MASK_BG_HI = (180, 180, 75)
+# UI 图标：三通道接近(近灰) + 亮度 ∈ [50,127] (BGI MaskCalculator)
+_MASK_ICON_CHAN_DIFF = 8  # max-min < 此值 = 近灰
+_MASK_ICON_BRIGHT_LO = 50
+_MASK_ICON_BRIGHT_HI = 127
+
+# 置信度阈值（实机标定后调高）
+# 合成图（无 UI/旋转/日夜变化）: 0.85+；真实小地图（有 UI/掩码/压缩）: 0.7+ 即可
+_MIN_SCORE = 0.7
 
 
 class PositionGetter:
     """从小地图截图获取玩家世界坐标。
 
-    使用 BGI 模板匹配方案（对照 SceneBaseMapByTemplateMatch）：
-    1. avc IMapMatcher: 朝向去旋转 + 粗匹配 + 精匹配
-    2. 无 avc 时回退到纯 Python 模板匹配（简化版）
+    avc 是通用小地图定位引擎（IMapMatcher：粗匹配 + 精匹配 + 亚像素）；
+    原神视觉特征（中心裁 156、朝向、BGI 掩码组合、坐标换算）全在本层处理：
+    1. 提取小地图 212² → 中心裁 156²（BGI Process1，去 UI 环）
+    2. 朝向：IOrientationDetector（独立、更准；失败当 0）
+    3. 掩码：IMaskBuilder 组合（扇形 ∩ 圆 − UI 图标 − 黄绿箭头）→ IMapMatcher.setMask
+    4. 多图层 IMapMatcher 匹配（BGI 6 层 MapBack）→ coarseMap 像素坐标 → 游戏坐标
     """
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
-        self._prev_x: float = -1
-        self._prev_y: float = -1
-        self._map_matcher = None  # avc IMapMatcher（懒加载）
-        self._map_matcher_initialized: bool = False
+        self._prev_x: float = 0
+        self._prev_y: float = 0
+        self._has_prev: bool = False
+        self._layers: list[_MapLayer] = []  # 多图层（懒加载）
+        self._layers_initialized: bool = False
+        self._prev_layer_idx: int = -1  # 上次匹配到的图层索引
+        self._od = None  # avc IOrientationDetector（懒加载）
+        self._mask_builder = None  # avc IMaskBuilder（懒加载）
+        self._mask_builder_initialized: bool = False
 
     def get_position(
         self,
@@ -97,8 +189,8 @@ class PositionGetter:
     ) -> tuple[float, float] | None:
         """获取当前玩家位置（原神地图坐标）。
 
-        1. 提取小地图区域
-        2. IMapMatcher 匹配（朝向去旋转 + 粗匹配 + 精匹配）
+        1. 提取小地图区域（212²）
+        2. _match：中心裁 156 → 朝向 + 掩码 → IMapMatcher 匹配
         3. 坐标转换 → 原神地图坐标
         4. 更新 prev_position
         """
@@ -114,6 +206,7 @@ class PositionGetter:
         result = self._match(minimap)
         if result is not None:
             self._prev_x, self._prev_y = result
+            self._has_prev = True
             return result
 
         return None
@@ -133,11 +226,12 @@ class PositionGetter:
         """设置上次位置（用于局部匹配优化，对照 BGI Navigation.SetPrevPosition）。"""
         self._prev_x = x
         self._prev_y = y
+        self._has_prev = True
 
     @property
     def prev_position(self) -> tuple[float, float] | None:
         """上次成功获取的位置。"""
-        if self._prev_x <= 0 and self._prev_y <= 0:
+        if not self._has_prev:
             return None
         return (self._prev_x, self._prev_y)
 
@@ -151,107 +245,388 @@ class PositionGetter:
             return None
 
     def _match(self, minimap_img: IImageBuffer) -> tuple[float, float] | None:
-        """小地图 → IMapMatcher 匹配 → 游戏坐标。
+        """小地图（≥156）→ 中心裁 156 → 朝向+掩码 → 多图层 IMapMatcher 匹配 → 游戏坐标。
 
-        对照 BGI SceneBaseMapByTemplateMatch.GetMiniMapPosition：
-        1. MiniMapPreprocessor: 朝向检测 + 遮罩
-        2. 粗匹配 + 精匹配
-        3. 坐标转换
+        对照 BGI SceneBaseMapByTemplateMatch:
+        - 有 prev_position → 先搜上次成功的层（LocalMatch），失败则遍历其他层
+        - 无 prev_position → 遍历所有层 GlobalMatch，取 score 最高的
         """
-        mm = self._get_map_matcher()
+        layers = self._get_layers()
+        if not layers:
+            return None
+
+        # 1. 中心裁 156 (BGI Process1: 去 UI 环, 统一朝向/掩码/匹配尺寸)
+        mini156 = self._center_crop_proc(minimap_img)
+        if mini156 is None:
+            return None
+
+        # 2. 朝向 (失败当 0) + 3. 掩码 (失败则全参与)
+        angle = self._get_orientation(mini156)
+        mask = self._build_mask(mini156, angle)
+
+        # 4. 多图层匹配
+        has_prev = self._has_prev
+        best_result = None  # (game_x, game_y, layer_idx)
+
+        if has_prev:
+            # 局部匹配：先搜覆盖 prev_position 的层（local 模式），再搜其他层（global 模式）
+            # 覆盖 prev 的层优先，且有局部搜索半径加速
+            local_layers = [i for i, l in enumerate(layers) if l.contains(self._prev_x, self._prev_y)]
+            other_layers = [i for i in range(len(layers)) if i not in local_layers]
+            # 上次成功的层如果还在 local 列表中就排第一
+            if 0 <= self._prev_layer_idx < len(layers) and self._prev_layer_idx in local_layers:
+                local_layers.remove(self._prev_layer_idx)
+                local_layers.insert(0, self._prev_layer_idx)
+            order = local_layers + other_layers
+            for idx in order:
+                layer = layers[idx]
+                is_local = idx in local_layers
+                result = self._match_layer(layer, mini156, mask, local=is_local)
+                if result is not None:
+                    gx, gy, score = result
+                    best_result = (gx, gy, idx)
+                    break
+
+        if best_result is None:
+            # 全局匹配：遍历所有层，收集候选，优先选位置在层覆盖范围内的
+            candidates: list[tuple[float, float, int, float]] = []  # (gx, gy, idx, score)
+            for idx, layer in enumerate(layers):
+                result = self._match_layer(layer, mini156, mask, local=False)
+                if result is not None:
+                    gx, gy, score = result
+                    candidates.append((gx, gy, idx, score))
+
+            if candidates:
+                # 按 score 降序
+                candidates.sort(key=lambda c: c[3], reverse=True)
+                best_score = candidates[0][3]
+                # 在 top 候选中（score 差距 <0.1），优先选位置在层覆盖范围内的
+                for gx, gy, idx, score in candidates:
+                    if score < best_score - 0.1:
+                        break
+                    if layers[idx].contains(gx, gy):
+                        best_result = (gx, gy, idx)
+                        break
+                # 全不在覆盖范围内时回退最高 score
+                if best_result is None:
+                    gx, gy, idx, score = candidates[0]
+                    best_result = (gx, gy, idx)
+
+        if best_result is not None:
+            self._prev_layer_idx = best_result[2]
+            return (best_result[0], best_result[1])
+
+        return None
+
+    def _match_layer(
+        self, layer: _MapLayer, mini156: IImageBuffer, mask: IImageBuffer | None, local: bool
+    ) -> tuple[float, float, float] | None:
+        """在单层上执行匹配，返回 (game_x, game_y, score) 或 None。"""
+        mm = layer.mm
         if mm is None:
             return None
 
-        # 有 prev_position → 设置 ROI 局部搜索
-        if not (self._prev_x <= 0 and self._prev_y <= 0):
-            cx, cy = self._game_to_map256(self._prev_x, self._prev_y)
-            half = int(_LOCAL_WINDOW_UNITS * MAP256_SCALE)
-            x0 = max(0, int(cx) - half)
-            y0 = max(0, int(cy) - half)
-            mm.setRoi(x0, y0, half * 2, half * 2)
+        # 设置掩码
+        if mask is not None:
+            mm.setMask(mask)
         else:
-            mm.clearRoi()
+            mm.clearMask()
+        mm.setSubPixel(True)
+        mm.setMinScore(_MIN_SCORE)
 
-        if mm.match(minimap_img) == 0:
+        # ROI 局部搜索: prev_position 在该层覆盖范围内时用局部匹配，否则全局
+        use_local = (
+            local
+            and self._has_prev
+            and layer.contains(self._prev_x, self._prev_y)
+        )
+        if use_local:
+            cx, cy = layer.game_to_coarse(self._prev_x, self._prev_y)
+            mm.setPrevPosition(cx, cy)
+            # BGI: RoughSearchRadius=50 (color-px)
+            mm.setRoughSearchRadius(_ROUGH_SEARCH_RADIUS)
+        else:
+            mm.clearPrevPosition()
+            mm.setRoughSearchRadius(0)
+
+        # 匹配
+        if mm.match(mini156) == 0:
             return None
-
         r = mm.getResult()
         if r is None:
             return None
 
-        # 地图像素坐标 → 游戏坐标
-        # BGI MapBack 图的坐标系统与 256 地图不同，需要根据 layer 信息转换
-        # 简化: 暂用 256 地图坐标转换（实机标定后修正）
-        return self._map256_to_game(r.px, r.py)
+        gx, gy = layer.coarse_to_game(r.px, r.py)
+        return (gx, gy, r.score)
 
-    def _get_map_matcher(self):
-        """懒建 avc IMapMatcher + 加载分层地图资源。"""
-        if self._map_matcher_initialized:
-            return self._map_matcher
-        self._map_matcher_initialized = True
+    def _layer_search_order(self) -> list[int]:
+        """返回图层搜索顺序：上次成功的层优先，再其他层。"""
+        n = len(self._layers)
+        if self._prev_layer_idx < 0 or self._prev_layer_idx >= n:
+            return list(range(n))
+        order = [self._prev_layer_idx]
+        for i in range(n):
+            if i != self._prev_layer_idx:
+                order.append(i)
+        return order
 
+    # ── 预处理（裁剪 / 朝向 / 掩码）──
+
+    def _center_crop_proc(self, buf: IImageBuffer) -> IImageBuffer | None:
+        """中心裁剪到 PROC_MINIMAP_SIZE (156)；已 ≤156 时原样返回。"""
+        try:
+            from avc import Image
+
+            w = buf.width
+            h = buf.height
+            if w <= PROC_MINIMAP_SIZE or h <= PROC_MINIMAP_SIZE:
+                return buf
+            off = (w - PROC_MINIMAP_SIZE) // 2
+            offy = (h - PROC_MINIMAP_SIZE) // 2
+            return Image.crop(buf, off, offy, PROC_MINIMAP_SIZE, PROC_MINIMAP_SIZE)
+        except Exception:
+            return None
+
+    def _get_orientation(self, mini156: IImageBuffer) -> float:
+        """朝向角（0=东/顺时针，[45,360]）；失败当 0（不阻塞匹配）。"""
+        od = self._get_od()
+        if od is None:
+            return 0.0
+        try:
+            ang = od.compute(mini156)
+            return float(ang) if ang >= 0 else 0.0
+        except Exception:
+            return 0.0
+
+    def _get_od(self):
+        """懒建 avc IOrientationDetector（无 avc/插件未装返回 None）。"""
+        if self._od is not None:
+            return self._od
+        try:
+            from avc import Vision
+
+            self._od = Vision.createOrientationDetector()
+            return self._od
+        except Exception:
+            return None
+
+    def _build_mask(self, mini156: IImageBuffer, angle: float) -> IImageBuffer | None:
+        """BGI 掩码组合：扇形 ∩ 圆 − UI 图标 − 黄绿箭头。失败返回 None。"""
+        mb = self._get_mask_builder()
+        if mb is None:
+            return None
+        try:
+            from avc import Image
+            from avc._core import ColorSpace
+
+            def _wrap(raw):
+                """SWIG buildXxxMask 返回 AvcWrapper.IImageBuffer，需包装为 avc.image.IImageBuffer。"""
+                if raw is None:
+                    return None
+                return Image.IImageBuffer(raw) if not hasattr(raw, "width") else raw
+
+            # 扇形：玩家可见区（排除正前方 UI）；椭圆半轴满尺寸 → 整圆扇形
+            sector = _wrap(mb.buildSectorMask(
+                PROC_MINIMAP_SIZE, PROC_MINIMAP_SIZE, _PROC_CENTER, _PROC_CENTER,
+                _MASK_SECTOR_HALF, _MASK_SECTOR_HALF,
+                angle + _MASK_SECTOR_BACK, angle + _MASK_SECTOR_FRONT,
+            ))
+            # 圆形裁剪（排除四角）
+            circle = _wrap(mb.buildCircleMask(
+                PROC_MINIMAP_SIZE, PROC_MINIMAP_SIZE, _PROC_CENTER, _PROC_CENTER,
+                _MASK_CIRCLE_RADIUS,
+            ))
+            m = mb.maskAnd(sector, circle)
+            if m is None:
+                return None
+            m = _wrap(m)
+            # 减去 UI 图标（上层 cv2：近灰 + 中亮度）
+            icon = self._build_icon_mask(mini156)
+            if icon is not None:
+                m = _wrap(mb.maskAnd(m, mb.maskNot(icon)))
+            # 减去黄绿任务箭头
+            bg = mb.buildColorRangeMask(
+                mini156, ColorSpace.bgr,
+                _MASK_BG_LO[0], _MASK_BG_LO[1], _MASK_BG_LO[2],
+                _MASK_BG_HI[0], _MASK_BG_HI[1], _MASK_BG_HI[2],
+            )
+            if bg is not None:
+                bg = _wrap(bg)
+                m = _wrap(mb.maskAnd(m, mb.maskNot(bg)))
+            return m
+        except Exception:
+            return None
+
+    def _get_mask_builder(self):
+        """懒建 avc IMaskBuilder（无 avc/插件未装返回 None）。"""
+        if self._mask_builder_initialized:
+            return self._mask_builder
+        self._mask_builder_initialized = True
+        try:
+            from avc import Vision
+
+            self._mask_builder = Vision.createMaskBuilder()
+            return self._mask_builder
+        except Exception:
+            return None
+
+    def _build_icon_mask(self, mini156: IImageBuffer) -> IImageBuffer | None:
+        """UI 图标掩码（BGI MaskCalculator：三通道接近 + 亮度∈[50,127]）。
+
+        纯 avc + bytes 实现，不依赖 numpy/cv2：
+        1. to_bytes() 取 BGRA8 原始数据
+        2. 逐像素判断：BGR 通道最大差 < _MASK_ICON_CHAN_DIFF 且最大通道 ∈ [_MASK_ICON_BRIGHT_LO, _MASK_ICON_BRIGHT_HI]
+        3. 生成 r8 掩码（255=图标，0=非图标）
+        """
+        try:
+            w = mini156.width
+            h = mini156.height
+            raw = mini156.to_bytes()
+            if not raw or len(raw) < h * w * 4:
+                return None
+        except Exception:
+            return None
+
+        mask = bytearray(h * w)
+        for y in range(h):
+            row_off = y * w * 4
+            for x in range(w):
+                off = row_off + x * 4
+                b, g, r = raw[off], raw[off + 1], raw[off + 2]
+                ch_max = max(b, g, r)
+                ch_min = min(b, g, r)
+                if (ch_max - ch_min < _MASK_ICON_CHAN_DIFF
+                        and _MASK_ICON_BRIGHT_LO <= ch_max <= _MASK_ICON_BRIGHT_HI):
+                    mask[y * w + x] = 255
+
+        try:
+            import avc
+            from avc._core import ImageType
+
+            buf = avc.Image.IImageBuffer()
+            buf.setFormat(w, h, ImageType.r8)
+            buf.from_bytes(bytes(mask))
+            return buf
+        except Exception:
+            return None
+
+    @staticmethod
+    def _gray_to_buffer(gray_w: int, gray_h: int, gray_bytes: bytes) -> IImageBuffer | None:
+        """单通道 r8 bytes → IImageBuffer。"""
+        try:
+            import avc
+            from avc._core import ImageType
+
+            buf = avc.Image.IImageBuffer()
+            buf.setFormat(gray_w, gray_h, ImageType.r8)
+            buf.from_bytes(gray_bytes)
+            return buf
+        except Exception:
+            return None
+
+    def _get_layers(self) -> list[_MapLayer]:
+        """懒加载所有 MapBack 分层（对照 BGI BaseMapLayerByTemplateMatch.LoadLayers）。
+
+        从 mapback_info.json + mapback_6_0_info.json 读层信息，每层创建独立 IMapMatcher。
+        """
+        if self._layers_initialized:
+            return self._layers
+        self._layers_initialized = True
+
+        try:
+            from avc import Vision
+
+            # 1. 读取所有 info JSON，合并层信息
+            layer_infos: list[dict] = []
+            for info_name in _MAPBACK_INFO_FILES:
+                info_path = res.map(f"{_MAPBACK_DIR}/{info_name}")
+                if info_path.exists():
+                    with open(info_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            layer_infos.extend(data)
+
+            if not layer_infos:
+                # 回退: 尝试直接加载 MapBack_0（硬编码最低保障）
+                color_path = res.map(f"{_MAPBACK_DIR}/MapBack_0_color.webp")
+                if color_path.exists():
+                    mm = self._create_matcher(color_path, res.map(f"{_MAPBACK_DIR}/MapBack_0_gray.webp"))
+                    if mm is not None:
+                        self._layers = [_MapLayer(layer_id="MapBack_0", left=12384.0, top=1024.0, scale=1.0, mm=mm)]
+                return self._layers
+
+            # 2. 为每层创建 IMapMatcher + 加载资源
+            for info in layer_infos:
+                layer_id = info.get("LayerId", "")
+                if not layer_id:
+                    continue
+                color_path = res.map(f"{_MAPBACK_DIR}/{layer_id}_color.webp")
+                gray_path = res.map(f"{_MAPBACK_DIR}/{layer_id}_gray.webp")
+                if not color_path.exists():
+                    continue
+                mm = self._create_matcher(color_path, gray_path)
+                if mm is None:
+                    continue
+                # 从彩图文件计算覆盖范围（BGI 翻转坐标系）
+                cw, ch = self._read_image_size(color_path)
+                s = float(info.get("Scale", 1))
+                left = float(info.get("Left", 0))
+                top = float(info.get("Top", 0))
+                # BGI: game_x = Left - px * zoom / Scale
+                # px=0 → game=Left（最大），px=width → game=Left - width*zoom/Scale（最小）
+                right = left - (cw * _ROUGH_ZOOM / s if cw else 0)
+                bottom = top - (ch * _ROUGH_ZOOM / s if ch else 0)
+                layer = _MapLayer(
+                    layer_id=layer_id,
+                    left=left,
+                    top=top,
+                    scale=s,
+                    mm=mm,
+                    right=right,
+                    bottom=bottom,
+                )
+                self._layers.append(layer)
+
+            # 3. 无层可用时回退 256 全地图
+            if not self._layers:
+                map256_path = res.map(MAP256_IMAGE)
+                if map256_path.exists():
+                    mm = Vision.createMapMatcher()
+                    if mm is not None:
+                        mm.setMapImageByPath(str(map256_path))
+                        self._layers = [_MapLayer(layer_id="Teyvat_0_256", left=0, top=0, scale=1.0, mm=mm)]
+
+            return self._layers
+        except Exception:
+            return self._layers
+
+    @staticmethod
+    def _read_image_size(path) -> tuple[int, int]:
+        """读取图片尺寸（宽,高），失败返回 (0,0)。"""
+        try:
+            from PIL import Image as PILImage
+            with PILImage.open(str(path)) as img:
+                return img.size  # (width, height)
+        except Exception:
+            return (0, 0)
+
+    @staticmethod
+    def _create_matcher(color_path, gray_path) -> IMapMatcher | None:
+        """创建并配置单个 IMapMatcher（BGI MiniMapMatchConfig: RoughSize=52, ExactSize=260）。"""
         try:
             from avc import Vision
 
             mm = Vision.createMapMatcher()
             if mm is None:
                 return None
-
-            # 加载主地图层（MapBack_0）
-            # 对照 BGI BaseMapLayerByTemplateMatch.LoadLayer
-            # stb_image 不支持 WEBP，用 cv2 加载后转 IImageBuffer
-            color_path = res.map(f"{_MAPBACK_DIR}/MapBack_0_color.webp")
-            gray_path = res.map(f"{_MAPBACK_DIR}/MapBack_0_gray.webp")
-
-            import os
-
-            if color_path.exists():
-                self._load_map_to_matcher(mm, str(color_path), "color")
-            else:
-                # 回退: 用 256 全地图（精度较低）
-                map256_path = res.map(MAP256_IMAGE)
-                if map256_path.exists():
-                    self._load_map_to_matcher(mm, str(map256_path), "color")
-                else:
-                    return None
-
+            mm.setMapImageByPath(str(color_path))
             if gray_path.exists():
-                self._load_map_to_matcher(mm, str(gray_path), "gray")
-
-            self._map_matcher = mm
+                mm.setFineMapImageByPath(str(gray_path))
+            mm.setCoarseSize(52)
+            mm.setExactSize(260)
             return mm
         except Exception:
             return None
-
-    @staticmethod
-    def _load_map_to_matcher(mm, path: str, kind: str) -> bool:
-        """用 cv2 加载图片（支持 WEBP）→ IImageBuffer → 传给 IMapMatcher。
-
-        stb_image (loadImagePath) 不支持 WEBP，所以用 cv2 加载后转 IImageBuffer。
-        """
-        import cv2
-
-        import avc
-        from avc._core import ImageType
-
-        img = cv2.imread(path, cv2.IMREAD_COLOR if kind == "color" else cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            return False
-
-        if kind == "color":
-            bgra = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            buf = avc.Image.IImageBuffer()
-            buf.setFormat(bgra.shape[1], bgra.shape[0], ImageType.bgra8)
-            buf.from_bytes(bgra.tobytes())
-            mm.setMapImage(buf)
-        else:
-            # 灰度图: 转 BGRA (单通道→4通道)
-            bgra = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
-            buf = avc.Image.IImageBuffer()
-            buf.setFormat(bgra.shape[1], bgra.shape[0], ImageType.bgra8)
-            buf.from_bytes(bgra.tobytes())
-            mm.setFineMapImage(buf)
-        return True
 
     # ── 256 地图坐标转换（BGI TeyvatMap，2048 缩放 ÷8）──
 
@@ -268,6 +643,21 @@ class PositionGetter:
             (MAP256_ORIGIN_X - px) / MAP256_SCALE,
             (MAP256_ORIGIN_Y - py) / MAP256_SCALE,
         )
+
+    # ── MapBack 粗匹配坐标转换（委托 _MapLayer）──
+
+    def _coarse_to_game(self, px: float, py: float, layer_idx: int = 0) -> tuple[float, float]:
+        """coarseMap 像素坐标 → 游戏坐标（默认第 0 层，兼容旧接口）。"""
+        if layer_idx < len(self._layers):
+            return self._layers[layer_idx].coarse_to_game(px, py)
+        # 回退: MapBack_0 硬编码（BGI 翻转公式）
+        return (12384.0 - px * _ROUGH_ZOOM, 1024.0 - py * _ROUGH_ZOOM)
+
+    def _game_to_coarse(self, gx: float, gy: float, layer_idx: int = 0) -> tuple[float, float]:
+        """游戏坐标 → coarseMap 像素坐标（默认第 0 层，兼容旧接口）。"""
+        if layer_idx < len(self._layers):
+            return self._layers[layer_idx].game_to_coarse(gx, gy)
+        return ((12384.0 - gx) / _ROUGH_ZOOM, (1024.0 - gy) / _ROUGH_ZOOM)
 
     @staticmethod
     def image_to_game_coords(

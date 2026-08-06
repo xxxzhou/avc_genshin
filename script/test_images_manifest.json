@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "dest_dir": "tests/fixtures/web",
+  "description": "网上公开原神游戏画面测试图清单（唯一权威）。用途：用真实游戏像素验证检测器——有怪→检测出怪？有 UI→识别出场景？OCR 出文字？合成测试只证机制，本清单补「真实画面识别性」。图不进 git（.gitignore 已忽略 tests/fixtures/web/），由 script/fetch_test_images.py 下载。断言以识别性为主（认不认得出画面）；位置/朝向精度需玩家坐标 ground truth，网上图没有，留实机自截（tests/fixtures/screens/ + test_real_screens.py）。",
+  "usage": "python script/fetch_test_images.py --list            # 列出全部图及就绪状态\n        python script/fetch_test_images.py --select fight_hilichurls  # 下载单张\n        python script/fetch_test_images.py --all            # 全下\n        python -m pytest tests/test_web_screens.py -v -s    # 跑断言+诊断（无图 skip）\n\n扩充：往 items 加一条 {id,name,url,filename,scene,has,tests,expect} 即可，下载脚本与测试自动识别。",
+  "normalize": {
+    "to": [1920, 1080],
+    "where": "test_load",
+    "method": "avc IImageBuffer.resize (stretch)",
+    "note": "下载脚本只下载、保留原图任意尺寸（不限分辨率）；归一化在测试加载侧完成——tests/test_web_screens.py 用 avc.Image.loadImage 加载后，若尺寸≠1920×1080 则 IImageBuffer.resize(1920,1080)（avc/image.py 原生 API）再喂检测器，使基于 1080p 的坐标（血条 ROI/模板/像素采样）对齐。⚠ 拉伸改变纵横比（如 16:10→16:9），小地图变椭圆→position/orientation 仅诊断；血条/场景/YOLO 对变形容忍度高。原图分辨率记在每个 item 的 source_size。"
+  },
+  "expect_keys": {
+    "scene": "str — game_state.make_classifier(ctx)(frame).scene 期望值：main_ui/combat/dialog/map/loading/domain/menu/unknown",
+    "has_enemy": "bool — fighter.has_enemy_in_frame(frame)",
+    "blood_bars_min": "int — len(fighter.detect_blood_bars(frame)) ≥ N",
+    "scene_flags": "{has_paimon_menu: true, ...} — game_state 17 个 has_*/is_* 原语逐个断言",
+    "contains_text": "[str, ...] — vision_utils.find_text 每个关键词都命中",
+    "yolo_min": "{类名: 最小数量} — GenshinDetector(bgi_world).detect(frame)；模型不在则该项跳过",
+    "position": "[x,y] + position_tol — 需 ground truth，网上图不填",
+    "orientation": "度 + orientation_tol — 需 ground truth，网上图不填"
+  },
+  "items": [
+    {
+      "id": "fight_hilichurls",
+      "name": "战斗：丘丘人",
+      "url": "https://github.com/FrozenPeak0701/GenshinYOLO23/assets/73618481/9a6094e6-546d-40cd-ae3a-babc7c9d5b77",
+      "filename": "fight_hilichurls.png",
+      "source_size": [2560, 1600],
+      "scene": "combat",
+      "has": ["丘丘人敌人(头顶红色血条)", "右上角小地图", "出战角色槽", "技能按键"],
+      "tests": ["血条/敌人检测", "场景分类(combat)", "YOLO 怪物检测", "小地图定位/朝向(诊断)"],
+      "expect": {
+        "has_enemy": true,
+        "blood_bars_min": 1
+      },
+      "note": "来源 GenshinYOLO23 README 怪物检测演示截图（FrozenPeak0701/GenshinYOLO23，YOLOv5 原神怪物检测项目，23 类含 Hilichurl/Slime/Ruin Guard 等）。GitHub user-attachments 直链已验证 HTTP 200、PNG（loadImage 支持）。原图 2560×1600(16:10)；测试加载时 avc resize 归一化到 1920×1080。实测(2026-08-06)：blood_bars=3/has_enemy=true（血条检测对真实画面有效✅）；scene 分类=unknown（make_classifier 判 combat 需 has_paimon_menu，该战斗图派蒙头像模板未匹配——UI 版本/resize 变形差异，留实机标定），故 expect 不含 scene。scene/position/orientation 仅作诊断打印。"
+    },
+    {
+      "id": "fish_coast",
+      "name": "钓鱼：岸边持竿",
+      "url": "https://github.com/user-attachments/assets/e1369fb7-beb7-4ad9-83a6-fece035812dd",
+      "filename": "fish_coast.png",
+      "source_size": [2880, 1620],
+      "scene": "unknown",
+      "has": ["钓鱼水域", "鱼咬气泡", "角色血量等级条"],
+      "tests": ["场景分类(诊断)", "OCR(诊断)", "小地图定位/朝向(诊断)"],
+      "expect": {"has_enemy": false},
+      "note": "来源 BetterGI issue #3347（自动钓鱼调时间指针 bug）。2880×1620(16:9)标准截图。钓鱼场景：角色岸边持竿、水域、鱼咬气泡。实测(2026-08-06)：blood_bars=0/has_enemy=false✅（钓鱼无敌人血条）；scene=unknown（has_paimon_menu=false，钓鱼视角无派蒙头像→非 main_ui，合理）；yolo={}。scene/position/orientation 仅诊断。"
+    },
+    {
+      "id": "leyline_bloom",
+      "name": "地脉之花：树脂界面",
+      "url": "https://github.com/user-attachments/assets/02e66edf-6e7d-4761-9d72-7f2ed8784a6f",
+      "filename": "leyline_bloom.png",
+      "source_size": [1920, 1123],
+      "scene": "unknown",
+      "has": ["地脉之花/奖励", "使用原粹树脂按钮"],
+      "tests": ["场景分类(诊断)", "OCR 文案(诊断)", "弹窗检测(诊断)"],
+      "expect": {"scene": "main_ui", "scene_flags": {"has_paimon_menu": true}},
+      "note": "来源 BetterGI issue #3385（树脂不足时不关地脉之花界面）。1920×1123(ar1.71)。地脉之花领奖/树脂界面。实测(2026-08-06)：has_paimon_menu=true✅（派蒙头像检测对真实画面有效）；scene=main_ui（⚠ 实为领奖弹窗，检测器仅凭派蒙头像判 main_ui，已知 limitation——地脉花/树脂弹窗的 has_flower_f_icon/OCR 文案未命中，留实机标定）；yolo={}。"
+    },
+    {
+      "id": "domain_exit",
+      "name": "秘境：退出确认弹窗",
+      "url": "https://github.com/user-attachments/assets/c7417f72-82bd-47e9-9cdf-b15b3f542bf2",
+      "filename": "domain_exit.png",
+      "source_size": [2560, 1440],
+      "scene": "domain",
+      "has": ["秘境画面", "退出确认弹窗", "派蒙头像", "底部血条"],
+      "tests": ["场景分类(domain)", "弹窗/对话检测(诊断)", "has_in_domain(诊断)"],
+      "expect": {},
+      "note": "来源 BetterGI issue #3362（圣遗物背包满/未领奖退出秘境）。2560×1440(16:9)。秘境场景+退出确认弹窗。vision 确认派蒙头像/血条/树脂按钮在。实测(2026-08-06)：scene=unknown，has_in_domain/has_page_close/has_paimon_menu 全 false——⚠ 秘境/弹窗检测对此图(BGI overlay+resize 变形+UI 版本差异)全部失效。expect 暂留空（检测器在此类图失效，留实机标定提升鲁棒性）。"
+    },
+    {
+      "id": "world_map",
+      "name": "大地图：提瓦特",
+      "url": "https://github.com/user-attachments/assets/8f458b33-337e-4ab7-95e7-b70d59f80199",
+      "filename": "world_map.png",
+      "source_size": [1352, 761],
+      "scene": "map",
+      "has": ["提瓦特全屏地图", "地名", "传送锚点图标"],
+      "tests": ["场景分类(map)", "has_map_scale_btn/settings(诊断)", "OCR 地名(诊断)"],
+      "expect": {},
+      "note": "来源 BetterGI issue #3318（地图追踪点位识别错误）。1352×761(16:9)。大地图全屏。vision 确认含提瓦特地图；⚠ 右侧含 BGI 工具面板(路径列表/点位信息)。实测(2026-08-06)：scene=unknown，has_map_scale_btn/has_map_settings_btn 全 false——⚠ 大地图场景检测对此图(BGI 右侧面板遮挡+resize 变形)失效，留实机标定。expect 暂留空。"
+    },
+    {
+      "id": "teleport_confirm",
+      "name": "大地图：传送锚点",
+      "url": "https://github.com/user-attachments/assets/fff3f445-0bbf-46e3-85a9-e57a8c8a1a8a",
+      "filename": "teleport_confirm.png",
+      "source_size": [1300, 752],
+      "scene": "map",
+      "has": ["大地图", "传送锚点", "传送按钮"],
+      "tests": ["场景分类(map)", "has_go_teleport(诊断)", "OCR(诊断)"],
+      "expect": {},
+      "note": "来源 BetterGI issue #3393（传送点附近自定义标识传送问题）。1300×752(~16:9)。大地图传送选址/确认。实测(2026-08-06)：scene=unknown，has_go_teleport/has_map_scale_btn 全 false——⚠ 传送/大地图检测对此图失效(同 world_map，overlay+变形)，留实机标定。expect 暂留空。"
+    }
+  ]
+}

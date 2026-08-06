@@ -223,6 +223,10 @@ class Runtime:
             self.ctx.release_all_keys()
         except Exception:
             pass
+        try:
+            self.ctx.close()
+        except Exception:
+            pass
         if self._observe is not None:
             self._observe.event("run_end")
             self._observe.logger.close()
