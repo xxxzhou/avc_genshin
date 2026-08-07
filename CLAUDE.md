@@ -119,7 +119,7 @@ avc_genshin/
 
 ## 8. 约定
 
-- **分辨率 1920×1080**，所有坐标基于 1080p；启动检查，不符报错。
+- **分辨率任意**：框架自动把非 1080P 的截图缩放归一化到 1920×1080 输出（所有坐标基于 1080p），无需启动检查报错。
 - **拟人化必须启用**——⚠️ avc 的 Python 绑定**没有** `setHumanize`（实测 `swig/python/avc/input.py` 仅 `setMoveDurationMs`/`setMoveSteps`/`setKeyDelayMs`）。拟人化（坐标抖动 + 0.8–1.2× 随机操作间隔 + 按住时长随机）由**框架层**实现：`framework/utils.py` 原语 + `GameContext`/`high_level_api` 每次输入套用。原神以管理员运行，本程序亦须管理员。
 - **BetterGI ONNX = YoloSharp = 标准 Ultralytics YOLOv8/YOLO11 格式**（源码核实：BGI 无自定义解码，全委托 YoloSharp NuGet）。真正坑：①**别再做 sigmoid**（已 bake 进图）②布局 `[1,4+nc,N]` 需转置 ③letterbox min 比例+居中 padding，框按 `(x-pad)/scale` 反变换（conf 0.3 / IoU 0.45，NMS 按类纯 IoU）。类名从 ONNX 元数据 `names` 读（旧 `label.json` 已废弃）。实现见 `src/abilities/detector.py`。
 - 仅供技术研究学习；使用自动化工具可能违反游戏服务条款。
@@ -144,6 +144,7 @@ python main.py --task verify           # 游戏内诊断（实机标定入口，
 | `docs/design/01-执行引擎.md` | Runtime / 守护 / 取消 / 沙箱 |
 | `docs/design/02-可靠性三件套.md` | 场景估计 / 并发权属 / 可观测 / 护栏 |
 | `docs/design/03-项目结构与公共层.md` | src 布局 / 公共层 / 资源 / 结构化日志 |
+| `docs/design/08-BGI对齐核查.md` | Phase D 领域能力（mail/craft/pot/domain）vs BGI 逐行差异报告（阈值/ROI/坐标） |
 | `docs/bgi-framework/00-主体框架.md` | BetterGI 源码分析（借鉴对象） |
 | `D:/Work/github/better-genshin-impact` | BetterGI 源码（参考） |
 | `D:/Work/github/avc` | avc C++ SDK（底层能力来源） |

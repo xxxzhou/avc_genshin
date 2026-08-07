@@ -120,6 +120,14 @@ MAP256_ORIGIN_X = (TEYVAT_MAP_LEFT_COLS + 1) * MAP256_BLOCK_WIDTH  # 4096
 MAP256_ORIGIN_Y = (TEYVAT_MAP_UP_ROWS + 1) * MAP256_BLOCK_WIDTH   # 2048
 MAP256_SCALE = MAP256_BLOCK_WIDTH / 1024.0  # 0.25 px/游戏单位
 
+# ── 大图 SIFT 视口重定位（对照 BGI BigMapTeyvat256Layer：预存底图特征 + 切块局部 FLANN）──
+_BIGMAP_VIEWPORT_SHRINK = 4  # 视口缩放比（BGI ResizeHelper 1/4，对齐 256 层尺度）
+_BIGMAP_TRAIN_KP = "Assets/Map/Teyvat/Teyvat_0_256_SIFT.kp.bin"  # BGI 预存底图关键点（28B/个 cv::KeyPoint）
+_BIGMAP_TRAIN_DESC = "Assets/Map/Teyvat/Teyvat_0_256_SIFT.mat.png"  # BGI 预存底图描述子（128×N 灰度 PNG）
+_BIGMAP_BLOCK_ROWS = (MAP256_H // MAP256_BLOCK_WIDTH) * 4  # 60（BGI GameMapRows×4 = 15 行×4）
+_BIGMAP_BLOCK_COLS = (MAP256_W // MAP256_BLOCK_WIDTH) * 4  # 88（BGI GameMapCols×4 = 22 列×4）
+_BIGMAP_EXPAND_CELLS = 2  # 局部搜索外扩格数（BGI KnnMatchLocal 默认 expandCells）
+
 # ── BGI 模板匹配资源路径 ──
 # 分层地图（对照 BGI BaseMapLayerByTemplateMatch.LoadLayers）
 _MAPBACK_DIR = "Assets/Map/Teyvat"
@@ -182,6 +190,9 @@ class PositionGetter:
         self._od = None  # avc IOrientationDetector（懒加载）
         self._mask_builder = None  # avc IMaskBuilder（懒加载）
         self._mask_builder_initialized: bool = False
+        self._fm = None  # avc IFeatureMatcher（大图 SIFT 重定位，懒加载）
+        self._fm_initialized: bool = False
+        self._train_loaded: bool = False  # BGI 预存底图特征是否已 loadTrainFeaturesPath
 
     def get_position(
         self,
@@ -212,15 +223,124 @@ class PositionGetter:
         return None
 
     def get_position_from_big_map(
-        self, frame: IImageBuffer | None = None
+        self,
+        frame: IImageBuffer | None = None,
+        expected_center: tuple[float, float] | None = None,
     ) -> tuple[float, float] | None:
-        """大图恢复定位：大图已打开时，匹配大图视口↔全地图，返回玩家游戏坐标。
+        """大图视口重定位：地图打开时，用 SIFT 在 Teyvat_0_256 底图定位当前视口，
+        返回视口中心（玩家位置）的游戏坐标。
 
-        对照 BGI SceneBaseMap.GetBigMapPosition（简化：直接模板匹配大图区域到全地图）。
-        ⚠ 大图打开/视口 ROI 边界留实机。
+        对照 BGI BigMapTeyvat256Layer.GetBigMapPosition：
+        - 底图(train)特征离线预存（.kp.bin/.mat.png）→ loadTrainFeaturesPath 一次进内存 + 切块
+        - 视口(query)灰度缩 1/4（对齐 256 层尺度）→ 实时 detectAndCompute
+        - 有 expected_center → matchQueryLocal（切块局部 FLANN knnMatch，BGI KnnMatchLocal）
+        - 无 expected_center → matchQueryFull（全图 FLANN match，BGI Match）
+        - avc 内部：H(query→train) 投影视口中心 → 256 底图坐标 → _map256_to_game → 游戏坐标
+
+        expected_center: 游戏坐标的预期视口中心（上轮定位结果），切块局部搜索用；None 走全图。
         """
-        # TODO: 大图定位使用 IMapMatcher，待实机验证
-        return None
+        fm = self._ensure_feature_matcher()
+        if fm is None or not self._load_train_features(fm):
+            return None
+        if frame is None:
+            frame = self.ctx.capture()
+        if frame is None:
+            return None
+
+        viewport = self._shrink_for_bigmap(frame)
+        if viewport is None:
+            return None
+
+        try:
+            if expected_center is not None:
+                rx, ry, rw, rh = self._build_search_rect(
+                    expected_center, viewport.width, viewport.height
+                )
+                hit = fm.matchQueryLocal(viewport, rx, ry, rw, rh, _BIGMAP_EXPAND_CELLS)
+            else:
+                hit = fm.matchQueryFull(viewport)
+            if hit <= 0:
+                return None
+            r = fm.getMatch(0)
+            if r is None:
+                return None
+            # 点结果：r.x/y = 视口中心在 256 底图的坐标（w=h=0 哨兵）
+            cx256 = float(r.x)
+            cy256 = float(r.y)
+        except Exception:
+            return None
+
+        return self._map256_to_game(cx256, cy256)
+
+    def _ensure_feature_matcher(self):
+        """懒加载 avc IFeatureMatcher（大图 SIFT 重定位）。失败返回 None。
+
+        BGI 定位走 loadTrainFeaturesPath/matchQueryLocal/matchQueryFull，内部强制 SIFT 无参
+        + 内嵌 BGI 常量（Lowe 0.75 / good≥7 / RANSAC 3.0），不读 setMethod/setMaxFeatures 等
+        配置，故此处不再设置（保持定位基线纯净）。
+        """
+        if not self._fm_initialized:
+            self._fm_initialized = True
+            try:
+                from avc import Vision
+
+                self._fm = Vision.createFeatureMatcher()
+            except Exception:
+                self._fm = None
+        return self._fm
+
+    def _load_train_features(self, fm) -> bool:
+        """一次性加载 BGI 预存底图特征 + 切块缓存（fm.loadTrainFeaturesPath）。已加载则跳过。"""
+        if self._train_loaded:
+            return True
+        try:
+            kp = res.map(_BIGMAP_TRAIN_KP)
+            desc = res.map(_BIGMAP_TRAIN_DESC)
+            if not kp.exists() or not desc.exists():
+                return False
+            self._train_loaded = bool(
+                fm.loadTrainFeaturesPath(
+                    str(kp),
+                    str(desc),
+                    MAP256_W,
+                    MAP256_H,
+                    _BIGMAP_BLOCK_ROWS,
+                    _BIGMAP_BLOCK_COLS,
+                )
+            )
+        except Exception:
+            self._train_loaded = False
+        return self._train_loaded
+
+    def _build_search_rect(
+        self,
+        expected_center: tuple[float, float],
+        query_w: int,
+        query_h: int,
+    ) -> tuple[int, int, int, int]:
+        """BGI BuildLocalSearchRect：以 expected_center(游戏坐标) 为中心的预期搜索矩形。
+
+        坐标系=256 底图（train）；size = min(train, max(query×2, train/4))，中心钳边界。
+        返回 (x, y, w, h) 供 matchQueryLocal 的 roi。
+        """
+        cx256, cy256 = self._game_to_map256(expected_center[0], expected_center[1])
+        rw = min(MAP256_W, max(query_w * 2, MAP256_W // 4))
+        rh = min(MAP256_H, max(query_h * 2, MAP256_H // 4))
+        x = max(0, min(int(round(cx256 - rw / 2.0)), MAP256_W - rw))
+        y = max(0, min(int(round(cy256 - rh / 2.0)), MAP256_H - rh))
+        return (x, y, rw, rh)
+
+    @staticmethod
+    def _shrink_for_bigmap(frame: IImageBuffer) -> IImageBuffer | None:
+        """视口截图缩 1/4（对齐 256 层尺度，BGI ResizeHelper），返回新 IImageBuffer 或 None。"""
+        try:
+            from avc import Image
+
+            w = max(1, frame.width // _BIGMAP_VIEWPORT_SHRINK)
+            h = max(1, frame.height // _BIGMAP_VIEWPORT_SHRINK)
+            return Image.resize(frame, w, h)
+        except Exception:
+            return None
 
     def set_prev_position(self, x: float, y: float) -> None:
         """设置上次位置（用于局部匹配优化，对照 BGI Navigation.SetPrevPosition）。"""

@@ -229,6 +229,9 @@ class GameContext:
         wx = int(buf_x) + self._border_left
         wy = int(buf_y) + self._border_top
         sp = self.sc.toScreen(wx, wy)
+        if not sp:
+            # fallback: 无窗口时 buffer 坐标即屏幕坐标（测试/mock 场景）
+            return int(buf_x), int(buf_y)
         return sp.x, sp.y
 
     def save_debug(self, path: str) -> None:

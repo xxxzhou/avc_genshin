@@ -131,7 +131,10 @@ class PathExecutor:
                 continue
             # 首点为传送
             if segment[0].type == "teleport":
-                teleporter.teleport_to((segment[0].x, segment[0].y))
+                tran_x, tran_y = teleporter.teleport_to((segment[0].x, segment[0].y))
+                # 传送后锚定 navigator 的 prev（解决无 prev 时 6 层小地图定位选错层；
+                # Navigator 有独立 PositionGetter，与 Teleporter 的不共享，需单独设）
+                navigator.set_prev_position(tran_x, tran_y)
             # 行走剩余路径点（move_mode 传给 Navigator：fly 先跳起 / climb 跳过卡死）
             for wp in segment[1:]:
                 navigator.go_to(wp)

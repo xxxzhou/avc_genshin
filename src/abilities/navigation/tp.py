@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from framework import utils
 from framework.resources import res
 
 if TYPE_CHECKING:
@@ -164,6 +165,14 @@ _MAP_UI_OVERLAY_H = 400  # 左上角 UI 覆盖区域高
 _TELEPORT_RETRY_COUNT = 3
 _TELEPORT_WAIT_MAIN_UI_TIMEOUT = 60.0  # 传送完成后等待主界面的超时(秒)
 
+# 导航循环（对照 BGI MoveMapToCore）
+_MAX_NAV_ITER = 30  # 拖拽循环最大迭代数（BGI MaxIterations）
+_MAX_NAV_FAILS = 3  # 连续 SIFT 定位失败上限 → 中止
+_MOVE_TOLERANCE = 200.0  # 目标进入容差即停止拖拽（game 单位，BGI Tolerance）
+_MAP_ZOOM_OUT_DISTANCE = 1500.0  # 远距先缩小阈值（game 单位，≈BGI MapZoomOutDistance 1000px@zoom4）
+_TELEPORT_MAX_ZOOM = 6.0  # 最大缩小档（BGI TeleportMaxZoomLevel）
+_CONFIRM_WAIT_TIMEOUT = 5.0  # 等待传送按钮出现的兜底超时（秒）
+
 
 class Teleporter:
     """通过地图 UI 操作执行传送。
@@ -181,6 +190,7 @@ class Teleporter:
         self.ctx = ctx
         self.g = g
         self._db = TpDatabase()
+        self._pg = None  # PositionGetter（大图 SIFT 定位 + prev 锚定，懒加载）
 
     def teleport_to(
         self,
@@ -210,6 +220,9 @@ class Teleporter:
 
         # 5. 等待传送完成
         self.g.wait_main_ui(timeout=_TELEPORT_WAIT_MAIN_UI_TIMEOUT)
+
+        # 6. 传送后锚定定位（解决无 prev 时 6 层小地图定位选错层）
+        self._set_prev_position(target)
 
         return (target.tran_x, target.tran_y)
 
@@ -242,43 +255,121 @@ class Teleporter:
         self.g.wait_scene(Scene.MAP, timeout=10.0)
 
     def _navigate_map_to_target(self, target: TpPosition) -> None:
-        """在地图上拖拽到目标位置并点击。
+        """在地图上拖拽到目标位置并点击传送点图标。
 
-        简化版：直接点击目标坐标（假设地图中心在玩家当前位置附近）。
-        BGI 的完整实现会做缩放/拖拽/图标匹配，我们的 v1 先用简单方式。
+        对照 BGI TpOnce 阶段 3-5（MoveMapToCore + ClickTeleportTargetMapPoint）：
+        切地面层 → 切国家 tab → SIFT 视口重定位循环（定位→算偏移→拖拽→重定位，
+        直到目标进入容差）→ 放大让图标显示 → 匹配目标 type 图标 → 点击。
+
+        v1 简化：异常检测只做"连续 N 次定位失败中止"；图标匹配取最近型命中
+        （不做 BGI 匈牙利算法相对模式，留 v2）。
         """
+        from abilities.navigation.map_ops import DISPLAY_TP_ZOOM, MapController
         from framework.scene import Scene
 
-        # 确认在地图界面
         if self.g.scene is None or self.g.scene.scene is not Scene.MAP:
             return
 
-        # 检查点击位置是否在安全区域
-        click_x, click_y = _MAP_CENTER_X, _MAP_CENTER_Y
-        if self._is_clickable(click_x, click_y):
-            # 简化：点击地图中心附近的传送点
-            # 实际应该根据 SIFT 识别大地图位置后计算点击坐标
-            # v1 先用占位逻辑
-            self.g.click(click_x, click_y)
+        mc = MapController(self.ctx, self.g)
+        frame = self.ctx.capture()
+
+        # 1. 切地面层（传送入口默认走地面）
+        mc.switch_to_ground_layer(frame)
+        frame = self.ctx.capture()
+
+        # 2. 切国家 tab（按 target.country，Teyvat 7 国）
+        if target.country:
+            mc.switch_country(target.country, frame)
+            frame = self.ctx.capture()
+
+        # 3. MoveMapToCore 循环：SIFT 定位视口 → 算偏移 → 拖拽 → 重定位
+        # 首轮无 expected（全图 Match）；后续传上轮 center（切块局部，BGI KnnMatchLocal）
+        fail_streak = 0
+        last_center: tuple[float, float] | None = None
+        for _ in range(_MAX_NAV_ITER):
+            center = self._big_map_position(last_center)
+            if center is None:
+                fail_streak += 1
+                if fail_streak >= _MAX_NAV_FAILS:
+                    raise RuntimeError(
+                        f"大图视口连续 {fail_streak} 次 SIFT 定位失败，无法导航到 {target.name}"
+                    )
+                utils.sleep(0.3)
+                frame = self.ctx.capture()
+                continue
+            fail_streak = 0
+            last_center = center
+
+            dx = target.x - center[0]
+            dy = target.y - center[1]
+            dist = math.hypot(dx, dy)
+            if dist < _MOVE_TOLERANCE:
+                break  # 目标进入容差 → 去点图标
+
+            zoom = mc.measure_zoom_level(frame) or 4.0
+            # 远距先缩小（拖拽更快），上限 _TELEPORT_MAX_ZOOM
+            if dist > _MAP_ZOOM_OUT_DISTANCE and zoom < _TELEPORT_MAX_ZOOM:
+                mc.set_zoom_level(min(_TELEPORT_MAX_ZOOM, zoom + 1.5), frame)
+                frame = self.ctx.capture()
+                zoom = mc.measure_zoom_level(frame) or zoom
+
+            mc.drag_map(dx, dy, zoom)
+            utils.sleep(0.3)
+            frame = self.ctx.capture()
+
+        # 4. 放大到 DisplayTpPointZoomLevel 让传送点图标显示
+        mc.set_zoom_level(DISPLAY_TP_ZOOM, frame)
+        frame = self.ctx.capture()
+
+        # 5. 匹配目标 type 图标并点击；未命中兜底点视口中心（最后一次定位处）
+        icon = mc.find_tp_icon(target.type, frame)
+        if icon is not None:
+            self.g.click(icon.cx, icon.cy)
+        else:
+            self.g.click(_MAP_CENTER_X, _MAP_CENTER_Y)
 
     def _wait_and_confirm_teleport(self) -> None:
-        """等待传送确认面板出现并确认。
+        """等待传送确认面板出现并点击传送按钮（兜底）。
 
-        quick_teleport 守护会自动处理，但如果守护未激活则需要手动确认。
+        quick_teleport 守护（Scene.MAP 下活跃）是主确认路径；本方法在守护未挂载时兜底。
+        用模板匹配 GoTeleport 按钮真实位置（替代硬编码坐标）。
         """
-        from abilities.game_state import has_go_teleport
-
-        # 等待传送按钮出现
-        frame = self.ctx.capture()
-        if frame is not None and has_go_teleport(self.ctx, frame):
-            # 点击传送按钮
-            self.g.click(1680, 960)  # GoTeleport 按钮大致位置（1080p）
-            return
-
-        # 备用：等待一段时间让 quick_teleport 守护处理
         import time
 
-        time.sleep(2.0)
+        from abilities import vision_utils as vu
+        from abilities.game_state import has_go_teleport
+
+        deadline = time.time() + _CONFIRM_WAIT_TIMEOUT
+        while time.time() < deadline:
+            frame = self.ctx.capture()
+            if frame is not None and has_go_teleport(self.ctx, frame):
+                rect = vu.find_template(self.ctx, "teleport/GoTeleport.png", frame=frame)
+                if rect is not None:
+                    self.g.click(rect.cx, rect.cy)
+                    return
+            utils.sleep(0.3)
+
+    def _big_map_position(
+        self, expected: tuple[float, float] | None = None
+    ) -> tuple[float, float] | None:
+        """SIFT 大图视口重定位（委托 PositionGetter.get_position_from_big_map）。
+
+        expected: 上轮定位的游戏坐标，传给切块局部搜索（BGI KnnMatchLocal）；
+        None 走全图兜底（BGI Match，首轮或丢失时用）。
+        """
+        if self._pg is None:
+            from abilities.navigation.position import PositionGetter
+
+            self._pg = PositionGetter(self.ctx)
+        return self._pg.get_position_from_big_map(expected_center=expected)
+
+    def _set_prev_position(self, target: TpPosition) -> None:
+        """传送后锚定小地图定位 prev（避免无 prev 时 6 层定位选错层）。"""
+        if self._pg is None:
+            from abilities.navigation.position import PositionGetter
+
+            self._pg = PositionGetter(self.ctx)
+        self._pg.set_prev_position(target.tran_x, target.tran_y)
 
     @staticmethod
     def _is_clickable(x: float, y: float) -> bool:

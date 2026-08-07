@@ -1,7 +1,7 @@
 """守护任务库（docs/design/01 §7、02 §1-3、05 §5）。
 
 导入本包即注册内置守护：frame / scene_estimator / auto_pick / auto_skip / loading_wait /
-auto_eat / quick_teleport / auto_open_chest。
+auto_eat / quick_teleport / auto_open_chest / auto_talk。
 任务侧用 ``ctx.mount("auto_pick")`` 挂载；框架保证并发安全（02 §2）。
 """
 
@@ -16,6 +16,7 @@ from framework.daemons import loading_wait as _loading_wait  # noqa: F401
 from framework.daemons import auto_eat as _auto_eat  # noqa: F401
 from framework.daemons import quick_teleport as _quick_teleport  # noqa: F401
 from framework.daemons import auto_open_chest as _auto_open_chest  # noqa: F401
+from framework.daemons import auto_talk as _auto_talk  # noqa: F401
 
 __all__ = [
     "Daemon",

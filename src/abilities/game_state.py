@@ -71,6 +71,26 @@ _TPL = {
     # Loading
     "enter_game": ("template_loading", "enter_game.png"),
     "girl_moon": ("template_loading", "girl_moon.png"),
+    # Mail (A1)
+    "esc_mail_reward": ("template_ui", "esc_mail_reward.png"),
+    "friend_chat": ("template_ui", "friend_chat.png"),
+    "collect": ("template_ui", "collect.png"),
+    # Craft (A2)
+    "craft_condensed_resin": ("template_ui", "craft_condensed_resin.png"),
+    "condensed_resin_count": ("template_ui", "condensed_resin_count.png"),
+    "fragile_resin_count": ("template_ui", "fragile_resin_count.png"),
+    # Pot (A3)
+    "sereniteapot": ("template_ui", "sereniteapot.png"),
+    "sereniteapot_home": ("template_ui", "sereniteapot_home.png"),
+    "wonderland_enter": ("template_ui", "wonderland_enter.png"),
+    "wonderland_close": ("template_ui", "wonderland_close.png"),
+    "sereniteapot_love": ("template_ui", "sereniteapot_love.png"),
+    "sereniteapot_money": ("template_ui", "sereniteapot_money.png"),
+    "sereniteapot_page_close": ("template_ui", "sereniteapot_page_close.png"),
+    # Domain (B1)
+    "btn_exit_door": ("template_ui", "btn_exit_door.png"),
+    "leyline_disorder_icon": ("template_ui", "leyline_disorder_icon.png"),
+    "abnormal_icon": ("template_ui", "abnormal_icon.png"),
 }
 
 
@@ -263,6 +283,88 @@ def has_icon_exclamation(ctx: "GameContext", frame: "IImageBuffer | None" = None
 def has_pick_f(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
     """拾取 F 键图标（BGI ``AutoPick``）。"""
     return _find_template(ctx, "pick_f", frame)
+
+
+# ── 邮件场景特征（A1）──
+
+
+def has_esc_mail_reward(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """派蒙菜单中的邮件奖励图标（BGI ``ClaimMailRewardsTask``，ROI=左下1/2）。"""
+    return _find_template(ctx, "esc_mail_reward", frame, roi=(0, 540, 480, 540))
+
+
+def has_friend_chat(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """好友聊天按钮（主界面左下，BGI 用于判断聊天界面）。"""
+    return _find_template(ctx, "friend_chat", frame)
+
+
+def has_collect_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """领取按钮（邮件/奖励界面，ROI=左下1/4）。"""
+    return _find_template(ctx, "collect", frame, roi=(0, 810, 480, 270))
+
+
+# ── 合成台场景特征（A2）──
+
+
+def has_craft_condensed_resin(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """浓缩树脂选项图标（BGI ``GoToCraftingBenchTask``，ROI=右半上2/3）。"""
+    return _find_template(ctx, "craft_condensed_resin", frame, roi=(960, 0, 960, 720))
+
+
+def has_condensed_resin_count(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """浓缩树脂数量显示（合成界面）。"""
+    return _find_template(ctx, "condensed_resin_count", frame)
+
+
+# ── 尘歌壶场景特征（A3）──
+
+
+def has_sereniteapot(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """尘歌壶区域标识（地图界面）。"""
+    return _find_template(ctx, "sereniteapot", frame)
+
+
+def has_sereniteapot_home(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """尘歌壶住宅图标（BGI ``GoToSereniteaPotTask``）。"""
+    return _find_template(ctx, "sereniteapot_home", frame)
+
+
+def has_wonderland_enter(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """洞天进入按钮（尘歌壶）。"""
+    return _find_template(ctx, "wonderland_enter", frame)
+
+
+def has_wonderland_close(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """洞天关闭按钮（尘歌壶）。"""
+    return _find_template(ctx, "wonderland_close", frame)
+
+
+def has_sereniteapot_love(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """好感领取按钮（尘歌壶，BGI ``SereniteaPotTask``）。"""
+    return _find_template(ctx, "sereniteapot_love", frame)
+
+
+def has_sereniteapot_money(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """宝钱领取按钮（尘歌壶）。"""
+    return _find_template(ctx, "sereniteapot_money", frame)
+
+
+# ── 秘境场景特征（B1）──
+
+
+def has_btn_exit_door(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """离开秘境按钮（秘境内）。"""
+    return _find_template(ctx, "btn_exit_door", frame)
+
+
+def has_leyline_disorder_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """地脉异常图标（秘境，BGI ``LeyLineDisorder``）。"""
+    return _find_template(ctx, "leyline_disorder_icon", frame)
+
+
+def has_abnormal_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+    """异常状态图标（战斗中）。"""
+    return _find_template(ctx, "abnormal_icon", frame)
 
 
 # ── 橙色选项检测（BGI ``IsOrangeOption``）──

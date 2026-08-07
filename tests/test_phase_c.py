@@ -364,7 +364,7 @@ class TestFighterSeek:
         monkeypatch.setattr(f, "find_nearest_enemy", lambda: None)
         r = f.seek_enemy(max_turns=3)
         assert r is None
-        assert ctx.ic.moveMouseBy.call_count == 3  # 每次盲转一档
+        assert ctx.ic.moveBy.call_count == 3  # 每次盲转一档
 
     def test_seek_aligns_to_blood_bar(self, monkeypatch):
         from abilities.fighter import SimpleFighter
@@ -376,7 +376,7 @@ class TestFighterSeek:
         monkeypatch.setattr(f, "find_nearest_enemy", lambda: next(calls))
         r = f.seek_enemy(max_turns=3)
         assert r is not None
-        assert ctx.ic.moveMouseBy.call_count == 2  # 盲转 1 次 + 对准 1 次
+        assert ctx.ic.moveBy.call_count == 2  # 盲转 1 次 + 对准 1 次
 
     def test_fight_until_clear_seeks_before_conclude(self, monkeypatch):
         from abilities.fighter import SimpleFighter

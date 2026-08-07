@@ -48,10 +48,19 @@ class Rect:
 
 
 def _resolve_template_path(path: str | Path) -> str:
-    """模板路径解析：绝对/已存在直用；否则经 ``res.template()``（含 BGI 回退）。"""
+    """模板路径解析：绝对/已存在直用；否则经 ``res.template()``（含 BGI 回退）。
+
+    兼容两种调用形式：
+    - ``"ui/x.png"``（文件名+子目录）→ ``res.template()`` 解析
+    - ``res.template_ui("x.png")`` 返回的相对路径 ``resources/templates/ui/x.png``
+      → 相对 cwd 解析后已存在则直接用（避免二次拼接）
+    """
     p = Path(path)
     if p.is_absolute() and p.exists():
         return str(p)
+    abs_p = p.resolve()
+    if abs_p.exists():
+        return str(abs_p)
     return str(res.template(path))
 
 

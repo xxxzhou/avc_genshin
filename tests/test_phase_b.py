@@ -662,8 +662,10 @@ class TestPathExecutorActions:
             "abilities.navigation.navigator.Navigator",
             lambda ctx, g: MagicMock(),
         )
+        mock_tp = MagicMock()
+        mock_tp.teleport_to.return_value = (0.0, 0.0)  # teleport_to 返回 (tran_x, tran_y)
         monkeypatch.setattr(
-            "abilities.navigation.tp.Teleporter", lambda ctx, g: MagicMock()
+            "abilities.navigation.tp.Teleporter", lambda ctx, g: mock_tp
         )
         pe = PathExecutor(MagicMock(), g)
         pt = PathTask(
@@ -714,7 +716,9 @@ class TestPathExecutorActions:
 
         g = MagicMock()
         monkeypatch.setattr("abilities.navigation.navigator.Navigator", lambda c, g: MagicMock())
-        monkeypatch.setattr("abilities.navigation.tp.Teleporter", lambda c, g: MagicMock())
+        mock_tp = MagicMock()
+        mock_tp.teleport_to.return_value = (0.0, 0.0)
+        monkeypatch.setattr("abilities.navigation.tp.Teleporter", lambda c, g: mock_tp)
         pe = PathExecutor(MagicMock(), g)
         pt = PathTask(
             info=PathTaskInfo(name="t"),
@@ -803,3 +807,478 @@ class TestNavigatorMoveModes:
             c for c in ctx.ic.press.call_args_list if c.args[0] == KeyCode.space
         ]
         assert len(space_presses) > 0  # 周期跳被触发
+
+
+# ── 大图 SIFT 视口重定位（get_position_from_big_map）──
+
+
+class TestBigMapSiftRelocation:
+    """get_position_from_big_map：BGI 预存底图 + 切块局部/全图定位 → 游戏坐标链。"""
+
+    @staticmethod
+    def _pg_with(fm, vp):
+        """构造 PositionGetter，把懒加载/预处理换成可控桩（隔离 avc/resources）。"""
+        from abilities.navigation.position import PositionGetter
+
+        pg = PositionGetter(MagicMock())
+        pg._ensure_feature_matcher = lambda: fm
+        pg._load_train_features = lambda f: True  # 默认底图特征已加载
+        pg._shrink_for_bigmap = lambda frame: vp
+        return pg
+
+    def test_coordinate_chain_full_search(self):
+        """无 expected → matchQueryFull；命中点 (340,335) → _map256_to_game → (15024.0, 6852.0)。"""
+        fm = MagicMock()
+        fm.matchQueryFull.return_value = 1  # 全图兜底，>0 视为命中
+        fm.getMatch.return_value = MagicMock(x=340, y=335, w=0, h=0)  # 点结果（w=h=0 哨兵）
+        pg = self._pg_with(fm, MagicMock())
+        # (4096-340)/0.25=15024.0, (2048-335)/0.25=6852.0
+        assert pg.get_position_from_big_map(frame=MagicMock()) == (15024.0, 6852.0)
+        fm.matchQueryFull.assert_called_once()
+        fm.matchQueryLocal.assert_not_called()
+
+    def test_returns_none_when_feature_matcher_unavailable(self):
+        """fm 创建失败（无 avc/插件）→ None。"""
+        pg = self._pg_with(None, MagicMock())
+        assert pg.get_position_from_big_map(frame=MagicMock()) is None
+
+    def test_returns_none_when_load_train_fails(self):
+        """底图特征加载失败 → None。"""
+        fm = MagicMock()
+        pg = self._pg_with(fm, MagicMock())
+        pg._load_train_features = lambda f: False  # 覆盖：加载失败
+        assert pg.get_position_from_big_map(frame=MagicMock()) is None
+
+    def test_returns_none_when_no_match(self):
+        """matchQueryFull 返回 0 → None。"""
+        fm = MagicMock()
+        fm.matchQueryFull.return_value = 0
+        pg = self._pg_with(fm, MagicMock())
+        assert pg.get_position_from_big_map(frame=MagicMock()) is None
+
+    def test_returns_none_when_get_match_none(self):
+        """getMatch(0) 返回 None → None。"""
+        fm = MagicMock()
+        fm.matchQueryFull.return_value = 1
+        fm.getMatch.return_value = None
+        pg = self._pg_with(fm, MagicMock())
+        assert pg.get_position_from_big_map(frame=MagicMock()) is None
+
+    def test_expected_center_uses_local_search(self):
+        """有 expected_center → matchQueryLocal（切块局部，BGI KnnMatchLocal）；
+        验证 roi 尺寸（BGI BuildLocalSearchRect：min(train, max(query×2, train/4))）+ expandCells。"""
+        from abilities.navigation.position import _BIGMAP_EXPAND_CELLS
+
+        fm = MagicMock()
+        fm.matchQueryLocal.return_value = 1
+        fm.getMatch.return_value = MagicMock(x=340, y=335, w=0, h=0)
+        vp = MagicMock()
+        vp.width = 480  # 视口缩 1/4 后（BGI resizedGrey 尺度）
+        vp.height = 270
+        pg = self._pg_with(fm, vp)
+        # expected_center 给游戏坐标；_build_search_rect 转 256 底图系算 roi
+        result = pg.get_position_from_big_map(frame=MagicMock(), expected_center=(15024.0, 6852.0))
+        assert result == (15024.0, 6852.0)
+        fm.matchQueryLocal.assert_called_once()
+        fm.matchQueryFull.assert_not_called()
+        # matchQueryLocal(viewport, roiX, roiY, roiW, roiH, expandCells)
+        args = fm.matchQueryLocal.call_args.args
+        assert args[0] is vp
+        assert args[5] == _BIGMAP_EXPAND_CELLS  # expandCells=2（BGI 默认）
+        # w=min(5632,max(480*2,5632//4))=min(5632,max(960,1408))=1408
+        # h=min(3840,max(270*2,3840//4))=min(3840,max(540,960))=960
+        assert args[3] == 1408
+        assert args[4] == 960
+
+
+# ── MapController：缩放测量 / 拖拽 / 国家切换 / 图标 ──
+
+
+def _mc(ctx=None, g=None):
+    """构造 MapController（ctx/g 用 MagicMock）。"""
+    from abilities.navigation.map_ops import MapController
+
+    ctx = ctx or MagicMock()
+    return MapController(ctx, g or MagicMock())
+
+
+class TestMapControllerZoom:
+    """measure_zoom_level：旋钮 Y → zoom_level（BGI -5*scale+6）。"""
+
+    def _mc_with_knob(self, monkeypatch, knob_cy):
+        from abilities.vision_utils import Rect
+
+        # Rect.cy = y + h/2；取 h=20 → y = knob_cy - 10
+        fake = lambda *a, **k: Rect(0, int(knob_cy) - 10, 20, 20)
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.vu.find_template", fake
+        )
+        return _mc()
+
+    def test_top_knob_is_max_zoom_out(self, monkeypatch):
+        """旋钮在顶（Y=468）→ zoom=1（最小放大）。"""
+        mc = self._mc_with_knob(monkeypatch, 468)
+        assert mc.measure_zoom_level(MagicMock()) == 1.0
+
+    def test_bottom_knob_is_max_zoom_in(self, monkeypatch):
+        """旋钮在底（Y=612）→ zoom=6（最大放大）。"""
+        mc = self._mc_with_knob(monkeypatch, 612)
+        assert mc.measure_zoom_level(MagicMock()) == 6.0
+
+    def test_midpoint(self, monkeypatch):
+        """旋钮居中（Y=540）→ zoom=3.5。"""
+        mc = self._mc_with_knob(monkeypatch, 540)
+        assert mc.measure_zoom_level(MagicMock()) == 3.5
+
+    def test_returns_none_when_knob_not_found(self, monkeypatch):
+        """旋钮模板未匹配 → None。"""
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.vu.find_template", lambda *a, **k: None
+        )
+        assert _mc().measure_zoom_level(MagicMock()) is None
+
+    def test_set_zoom_level_converges(self, monkeypatch):
+        """滚轮缩放：diff→notches→scroll，进入容差即停（不超额滚）。"""
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
+        )
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        # 初始 4.0 → diff 1.0(>0.3) 滚一轮；4.9 → diff 0.1(≤0.3) 停
+        mc.measure_zoom_level = MagicMock(side_effect=[4.0, 4.9])
+        assert mc.set_zoom_level(5.0) == 4.9
+        # notches = round(1.0 / 0.085) = 12；dy = _ZOOM_WHEEL_SIGN(-1) × (+1) × 12 = -12
+        ctx.ic.scroll.assert_called_once_with(0, -12)
+
+    def test_set_zoom_level_caps_notches(self, monkeypatch):
+        """diff 极大 → notches 封顶 _MAX_ZOOM_NOTCHES(16)，不溢出。"""
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
+        )
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        # 1.0 → 6.0：diff=5.0，单轮 notches 应封顶 16；6.0 已达容差返回
+        mc.measure_zoom_level = MagicMock(side_effect=[1.0, 6.0])
+        mc.set_zoom_level(6.0)
+        ctx.ic.scroll.assert_called_once_with(0, -16)
+
+    def test_set_zoom_level_none_when_unmeasurable(self, monkeypatch):
+        """测不到 zoom → 不滚轮，返回 None。"""
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
+        )
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        mc.measure_zoom_level = MagicMock(return_value=None)
+        assert mc.set_zoom_level(5.0) is None
+        ctx.ic.scroll.assert_not_called()
+
+
+class TestMapControllerDrag:
+    """drag_map：mouseDown→moveTo×N→mouseUp + buf_to_scr缩放 + 分步数。"""
+
+    def _ctx(self):
+        ctx = MagicMock()
+        ctx._MouseButton = {"left": "LB"}
+        ctx._dpi_scale = 1.0
+        ctx.ic = MagicMock()
+        ctx.ic.screenBounds = MagicMock(return_value=(1920, 1080))
+        ctx.sc = MagicMock()
+        ctx.sc.width = MagicMock(return_value=1920)
+        ctx.to_screen = MagicMock(return_value=(960, 540))
+        return ctx
+
+    def test_drag_sequence_and_total_distance(self):
+        """拖 1000 game 单位（zoom=1）→ moveTo 绝对坐标，终点 X ≈ 960+2361。"""
+        mc = _mc(self._ctx())
+        mc.drag_map(1000.0, 0.0, 1.0)
+        ic = mc.ctx.ic
+        # 第一个 moveTo 是起点，后续 moveTo 是每步目标
+        moves = ic.moveTo.call_args_list
+        assert len(moves) >= 6  # 起点 + 5~60 步
+        # 起点
+        assert moves[0].args == (960, 540)
+        # 终点 X ≈ 960 + MapScaleFactor(2.361)*1000/1.0 * (1920/1920) = 960+2361 = 3321
+        final_x = moves[-1].args[0]
+        assert abs(final_x - 3321) <= 25
+        # Y 全程 ≈ 540
+        for m in moves:
+            assert m.args[1] == 540
+        ic.mouseDown.assert_called_once_with("LB")
+        ic.mouseUp.assert_called_once_with("LB")
+
+    def test_small_distance_no_drag(self):
+        """偏移太小（<1px）→ 直接返回，不产生鼠标动作。"""
+        mc = _mc(self._ctx())
+        mc.drag_map(0.1, 0.1, 1.0)
+        mc.ctx.ic.mouseDown.assert_not_called()
+        mc.ctx.ic.moveTo.assert_not_called()
+
+    def test_drag_curve_monotonic_to_one(self):
+        """_drag_curve 0→1 单调递增，终点=1.0。"""
+        from abilities.navigation.map_ops import MapController
+
+        steps = 50
+        vals = [MapController._drag_curve(i, steps) for i in range(steps + 1)]
+        assert vals[0] == 0.0
+        assert abs(vals[-1] - 1.0) < 1e-9
+        for a, b in zip(vals, vals[1:]):
+            assert a <= b  # 单调非减
+
+
+class TestMapControllerCountryAndIcon:
+    """switch_country 调用序列 + 国家中心换轴 + 图标模板映射。"""
+
+    def test_country_center_axis_swap(self):
+        """蒙德中心 = (2278, -876)（avc 系，已从 BGI [X=-876,Y=2278] 换轴）。"""
+        from abilities.navigation.map_ops import MapController
+
+        assert MapController.country_center("蒙德") == (2278.0, -876.0)
+        assert MapController.country_center("不存在的国家") is None
+
+    def test_switch_country_click_sequence(self, monkeypatch):
+        """点区域按钮 → OCR 国家名 → 点国家名中心。"""
+        from abilities.vision_utils import Rect
+
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.vu.find_text",
+            lambda *a, **k: Rect(100, 100, 200, 40),  # cx=200, cy=120
+        )
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        assert mc.switch_country("蒙德", MagicMock()) is True
+        clicks = ctx.click_at.call_args_list
+        # 第一击：右下区域选择按钮
+        assert clicks[0].args == (1760, 1020)
+        # 第二击：OCR 命中国家名中心
+        assert clicks[1].args == (200, 120)
+
+    def test_switch_country_unknown_returns_false(self):
+        """未知国家名 → False，不点击。"""
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        assert mc.switch_country("亚特兰蒂斯", MagicMock()) is False
+        ctx.click_at.assert_not_called()
+
+    def test_icon_paths_teleport_waypoint(self):
+        from abilities.navigation.map_ops import MapController
+
+        assert MapController._icon_paths_for("TeleportWaypoint") == [
+            "teleport/TeleportWaypoint.png"
+        ]
+
+    def test_icon_paths_domain_supplements_domain2(self):
+        """秘境类补 Domain2.png（BGI 两种秘境图标）。"""
+        from abilities.navigation.map_ops import MapController
+
+        paths = MapController._icon_paths_for("OneTimeDomain")
+        assert "teleport/Domain.png" in paths
+        assert "teleport/Domain2.png" in paths
+
+    def test_icon_paths_unknown_type_empty(self):
+        from abilities.navigation.map_ops import MapController
+
+        assert MapController._icon_paths_for("MysteryType") == []
+
+    def test_switch_country_retries_then_succeeds(self, monkeypatch):
+        """OCR 前 2 次失败、第 3 次命中 → 仍点中国家名并返回 True。"""
+        from abilities.vision_utils import Rect
+
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.vu.find_text",
+            MagicMock(side_effect=[None, None, Rect(100, 100, 200, 40)]),
+        )
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        assert mc.switch_country("蒙德") is True
+        clicks = ctx.click_at.call_args_list
+        assert clicks[0].args == (1760, 1020)  # 区域选择按钮
+        assert clicks[1].args == (200, 120)  # 国家名中心(cx=200,cy=120)
+
+    def test_switch_country_all_retries_fail(self, monkeypatch):
+        """OCR 4 次全失败 → False，只点了区域按钮。"""
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
+        )
+        find_text = MagicMock(return_value=None)
+        monkeypatch.setattr("abilities.navigation.map_ops.vu.find_text", find_text)
+        ctx = MagicMock()
+        mc = _mc(ctx)
+        assert mc.switch_country("璃月") is False
+        assert find_text.call_count == 4  # _SWITCH_AREA_RETRIES
+        assert ctx.click_at.call_count == 1  # 只点了区域按钮，没点国家名
+        assert ctx.click_at.call_args.args == (1760, 1020)
+
+    def test_find_tp_icon_picks_nearest_to_center(self, monkeypatch):
+        """多候选 → 选最接近视口中心(960,540)者。"""
+        from abilities.vision_utils import Rect
+
+        found = {
+            "TeleportWaypoint.png": [
+                Rect(100, 100, 40, 40),  # cx=120,cy=120 远
+                Rect(900, 500, 40, 40),  # cx=920,cy=520 近
+            ]
+        }
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.vu.find_all_templates",
+            lambda *a, **k: found,
+        )
+        mc = _mc()
+        r = mc.find_tp_icon("TeleportWaypoint")
+        assert r is not None
+        assert (r.cx, r.cy) == (920, 520)
+
+    def test_find_tp_icon_no_match_returns_none(self, monkeypatch):
+        """视口内无匹配图标 → None。"""
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.vu.find_all_templates",
+            lambda *a, **k: {},
+        )
+        assert _mc().find_tp_icon("TeleportWaypoint") is None
+
+    def test_find_tp_icon_unknown_type_returns_none(self):
+        """未知 type → 无候选模板 → 直接 None（不调 find_all_templates）。"""
+        assert _mc().find_tp_icon("MysteryType") is None
+
+
+# ── _navigate_map_to_target（MoveMapToCore 循环）──
+
+
+class TestNavigateMapToTarget:
+    """_navigate_map_to_target：定位→拖拽→图标点击主循环。"""
+
+    @staticmethod
+    def _teleporter(monkeypatch, mc):
+        from framework.scene import Scene
+        from abilities.navigation.tp import Teleporter
+
+        monkeypatch.setattr(
+            "abilities.navigation.map_ops.MapController", lambda c, g: mc
+        )
+        # 跳过 utils.sleep 真睡，保持测试快
+        monkeypatch.setattr(
+            "abilities.navigation.tp.utils.sleep", lambda *a, **k: None
+        )
+        ctx = MagicMock()
+        g = MagicMock()
+        g.scene = MagicMock(scene=Scene.MAP)
+        tp = Teleporter(ctx, g)
+        tp._pg = MagicMock()  # 预置，避免 _big_map_position 真建 PositionGetter
+        return tp
+
+    def _target(self, **kw):
+        from abilities.navigation.tp import TpPosition
+
+        base = dict(
+            id=1, type="TeleportWaypoint", name="t", country=None,
+            areas=(), x=2000.0, y=0.0, tran_x=0.0, tran_y=0.0,
+        )
+        base.update(kw)
+        return TpPosition(**base)
+
+    def test_convergence_drags_then_clicks_icon(self, monkeypatch):
+        """位置递进：远→拖一次→近→退出→点图标。"""
+        from abilities.navigation.map_ops import DISPLAY_TP_ZOOM
+        from abilities.vision_utils import Rect
+
+        mc = MagicMock()
+        mc.measure_zoom_level.return_value = 4.0
+        mc.find_tp_icon.return_value = Rect(100, 100, 40, 40)  # cx=120, cy=120
+        tp = self._teleporter(monkeypatch, mc)
+        # iter1: 中心(1500,0) → dist 500(>200) 拖；iter2: 中心(1850,0) → dist 150(<200) 退
+        tp._pg.get_position_from_big_map.side_effect = [(1500.0, 0.0), (1850.0, 0.0)]
+
+        tp._navigate_map_to_target(self._target())
+
+        mc.switch_to_ground_layer.assert_called_once()
+        mc.switch_country.assert_not_called()  # country=None
+        mc.drag_map.assert_called_once_with(500.0, 0.0, 4.0)
+        # 收尾放大到 DisplayTpPointZoomLevel
+        assert mc.set_zoom_level.call_args.args[0] == DISPLAY_TP_ZOOM
+        mc.find_tp_icon.assert_called_once()
+        tp.g.click.assert_called_once_with(120.0, 120.0)
+
+    def test_aborts_after_consecutive_locate_failures(self, monkeypatch):
+        """SIFT 连续 3 次失败 → RuntimeError，不拖拽。"""
+        mc = MagicMock()
+        tp = self._teleporter(monkeypatch, mc)
+        tp._pg.get_position_from_big_map.side_effect = [None, None, None]
+        with pytest.raises(RuntimeError):
+            tp._navigate_map_to_target(self._target())
+        mc.drag_map.assert_not_called()
+
+    def test_country_switch_invoked(self, monkeypatch):
+        """target 有 country → switch_country 被调用。"""
+        mc = MagicMock()
+        mc.measure_zoom_level.return_value = 4.0
+        mc.find_tp_icon.return_value = None
+        tp = self._teleporter(monkeypatch, mc)
+        # 起点已在容差内（与 target (2000,0) 重合 → dist 0 < 200，不拖）
+        tp._pg.get_position_from_big_map.side_effect = [(2000.0, 0.0)]
+
+        tp._navigate_map_to_target(self._target(country="蒙德"))
+
+        mc.switch_country.assert_called_once()
+        assert mc.switch_country.call_args.args[0] == "蒙德"
+        mc.drag_map.assert_not_called()  # 已在容差内，不拖
+
+    def test_icon_not_found_falls_back_to_center(self, monkeypatch):
+        """图标未匹配 → 兜底点视口中心 (960,540)。"""
+        mc = MagicMock()
+        mc.measure_zoom_level.return_value = 4.0
+        mc.find_tp_icon.return_value = None
+        tp = self._teleporter(monkeypatch, mc)
+        tp._pg.get_position_from_big_map.side_effect = [(1990.0, 0.0)]  # 容差内
+
+        tp._navigate_map_to_target(self._target())
+
+        tp.g.click.assert_called_once_with(960, 540)
+
+    def test_not_in_map_scene_noop(self, monkeypatch):
+        """不在 Scene.MAP → 直接返回（不报错、不操作）。"""
+        from framework.scene import Scene
+
+        mc = MagicMock()
+        tp = self._teleporter(monkeypatch, mc)
+        tp.g.scene.scene = Scene.MAIN_UI
+        tp._navigate_map_to_target(self._target())
+        mc.switch_to_ground_layer.assert_not_called()
+
+
+# ── path_executor 传送后锚定 navigator prev ──
+
+
+class TestPathExecutorTeleportAnchor:
+    """传送后把 (tran_x, tran_y) 锚定到 navigator 的 prev_position。"""
+
+    def test_sets_navigator_prev_after_teleport(self, monkeypatch):
+        from abilities.navigation.path_executor import (
+            PathExecutor,
+            PathTask,
+            PathTaskInfo,
+            Waypoint,
+        )
+
+        navigator = MagicMock()
+        monkeypatch.setattr(
+            "abilities.navigation.navigator.Navigator", lambda c, g: navigator
+        )
+        teleporter = MagicMock()
+        teleporter.teleport_to.return_value = (1234.0, -567.0)
+        monkeypatch.setattr(
+            "abilities.navigation.tp.Teleporter", lambda c, g: teleporter
+        )
+
+        pe = PathExecutor(MagicMock(), MagicMock())
+        pt = PathTask(
+            info=PathTaskInfo(name="t"),
+            waypoints=(
+                Waypoint(x=0, y=0, type="teleport"),
+                Waypoint(x=1, y=1, type="path"),
+            ),
+        )
+        pe.execute(pt)
+        navigator.set_prev_position.assert_called_once_with(1234.0, -567.0)

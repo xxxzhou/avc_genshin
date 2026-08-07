@@ -76,7 +76,7 @@ _SWITCH_SLEEP = 0.25  # 切人后等到位（BGI Sleep(250)）
 _STEP_DEADLINE_CHECK = True  # rotation 每步前查 deadline/敌人
 
 # ── 索敌（转视角找敌，对齐 BGI AutoFightSeek）──
-_SEEK_TURN_PX = 60  # 单次水平转视角量（MoveMouseBy；实机验证步长/方向）
+_SEEK_TURN_PX = 60  # 单次水平转视角量（moveBy；实机验证步长/方向）
 _SEEK_MAX_TURNS = 8  # 判清场前最多转几次找敌
 _SEEK_ALIGN_TOL = 50  # 血条中心与屏幕中心水平偏差阈值（内视为已对准）
 
@@ -147,7 +147,7 @@ class SimpleFighter:
         return bars[0]
 
     def seek_enemy(self, max_turns: int = _SEEK_MAX_TURNS) -> Rect | None:
-        """转视角索敌：血条不在屏幕中心时 MoveMouseBy 旋转找敌，返回最近血条或 None。
+        """转视角索敌：血条不在屏幕中心时 moveBy 旋转找敌，返回最近血条或 None。
 
         对齐 BGI ``AutoFightSeek``（血条阈值→旋转找敌）；简化：固定步长转，
         不复用 RotaryFactorMapping。水平偏差 > ``_SEEK_ALIGN_TOL`` 才转向血条，
@@ -165,9 +165,9 @@ class SimpleFighter:
         return None
 
     def _rotate_camera(self, px: int) -> None:
-        """水平转视角（MoveMouseBy），异常吞掉。"""
+        """水平转视角（moveBy），异常吞掉。"""
         try:
-            self.ctx.ic.moveMouseBy(int(px), 0)
+            self.ctx.ic.moveBy(int(px), 0)
         except Exception:
             pass
         utils.sleep(0.1)

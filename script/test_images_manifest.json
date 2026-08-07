@@ -31,9 +31,10 @@
       "tests": ["血条/敌人检测", "场景分类(combat)", "YOLO 怪物检测", "小地图定位/朝向(诊断)"],
       "expect": {
         "has_enemy": true,
-        "blood_bars_min": 1
+        "blood_bars_min": 1,
+        "yolo_min": {"health bar": 1}
       },
-      "note": "来源 GenshinYOLO23 README 怪物检测演示截图（FrozenPeak0701/GenshinYOLO23，YOLOv5 原神怪物检测项目，23 类含 Hilichurl/Slime/Ruin Guard 等）。GitHub user-attachments 直链已验证 HTTP 200、PNG（loadImage 支持）。原图 2560×1600(16:10)；测试加载时 avc resize 归一化到 1920×1080。实测(2026-08-06)：blood_bars=3/has_enemy=true（血条检测对真实画面有效✅）；scene 分类=unknown（make_classifier 判 combat 需 has_paimon_menu，该战斗图派蒙头像模板未匹配——UI 版本/resize 变形差异，留实机标定），故 expect 不含 scene。scene/position/orientation 仅作诊断打印。"
+      "note": "来源 GenshinYOLO23 README 怪物检测演示截图（FrozenPeak0701/GenshinYOLO23，YOLOv5 原神怪物检测项目，23 类含 Hilichurl/Slime/Ruin Guard 等）。GitHub user-attachments 直链已验证 HTTP 200、PNG（loadImage 支持）。原图 2560×1600(16:10)；测试加载时 avc resize 归一化到 1920×1080。实测(2026-08-06)：blood_bars=3/has_enemy=true（血条检测对真实画面有效✅）；scene 分类=unknown（make_classifier 判 combat 需 has_paimon_menu，该战斗图派蒙头像模板未匹配——UI 版本/resize 变形差异，留实机标定），故 expect 不含 scene。scene/position/orientation 仅作诊断打印。复测(2026-08-07 avc 改造后)：blood_bars=4；yolo={health bar:2, ore:1}——bgi_world 共 7 类(health bar/enemy identify/drops/ore/unmined ore/chest/locked chest，不含怪物类，怪物走头顶血条检测)；框 78×7 细横条证 [1,4+nc,N] 转置对、center.y=392/228 落上半部证 letterbox 反变换对、分数 0.84/0.64/0.43 证未重做 sigmoid(3 坑均未踩)，故 expect 加 yolo_min:{health bar:1}。⚠ 本图实为 GenshinYOLO23 演示截图，图上‘Hilichurl 0.91’等系该项目 YOLO 标注(非游戏 UI)，故 bgi_world 不检出丘丘人正确(见 cache/verify_yolo_detector.py)。"
     },
     {
       "id": "fish_coast",
@@ -56,8 +57,8 @@
       "scene": "unknown",
       "has": ["地脉之花/奖励", "使用原粹树脂按钮"],
       "tests": ["场景分类(诊断)", "OCR 文案(诊断)", "弹窗检测(诊断)"],
-      "expect": {"scene": "main_ui", "scene_flags": {"has_paimon_menu": true}},
-      "note": "来源 BetterGI issue #3385（树脂不足时不关地脉之花界面）。1920×1123(ar1.71)。地脉之花领奖/树脂界面。实测(2026-08-06)：has_paimon_menu=true✅（派蒙头像检测对真实画面有效）；scene=main_ui（⚠ 实为领奖弹窗，检测器仅凭派蒙头像判 main_ui，已知 limitation——地脉花/树脂弹窗的 has_flower_f_icon/OCR 文案未命中，留实机标定）；yolo={}。"
+      "expect": {"scene": "main_ui", "scene_flags": {"has_paimon_menu": true}, "contains_text": ["原粹树脂"]},
+      "note": "来源 BetterGI issue #3385（树脂不足时不关地脉之花界面）。1920×1123(ar1.71)。地脉之花领奖/树脂界面。实测(2026-08-06)：has_paimon_menu=true✅（派蒙头像检测对真实画面有效）；scene=main_ui（⚠ 实为领奖弹窗，检测器仅凭派蒙头像判 main_ui，已知 limitation——地脉花/树脂弹窗的 has_flower_f_icon/OCR 文案未命中，留实机标定）；yolo={}。复测(2026-08-07)：OCR 认出‘补充原粹树脂’(0.997)/‘地脉之花’(1.0)/‘将消耗40个原粹树脂…’(0.985)，故 expect 加 contains_text:[原粹树脂] 验 OCR 链路(见 cache/verify_ocr.py)。⚠ 本图叠加 BGI 运行日志(任务结束/与凯瑟琳对话失败 等)，非纯游戏画面。"
     },
     {
       "id": "domain_exit",

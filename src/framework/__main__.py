@@ -27,6 +27,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", default="原神", help="目标窗口标题子串（默认：原神）")
     p.add_argument("--template", help="[proto=vision] 模板图路径（经 res.template 解析）")
     p.add_argument("--model", default="bgi_world.onnx", help="[proto=detect] ONNX 模型名")
+    p.add_argument("task_params", nargs="*", metavar="KEY=VALUE", help="任务参数（如 do_map_calib=true）")
     return p
 
 
@@ -45,12 +46,36 @@ def _run_proto(args: argparse.Namespace) -> int:
     return 2
 
 
+def _parse_task_params(pairs: list[str]) -> dict:
+    """Parse 'key=value' pairs into a dict, auto-converting bool/int/float."""
+    params: dict = {}
+    for pair in pairs:
+        if "=" not in pair:
+            print(f"忽略无效参数（需 KEY=VALUE）：{pair}", file=sys.stderr)
+            continue
+        k, v = pair.split("=", 1)
+        if v.lower() in ("true", "yes"):
+            params[k] = True
+        elif v.lower() in ("false", "no"):
+            params[k] = False
+        else:
+            try:
+                params[k] = int(v)
+            except ValueError:
+                try:
+                    params[k] = float(v)
+                except ValueError:
+                    params[k] = v
+    return params
+
+
 def _run_task(args: argparse.Namespace) -> int:
     from framework.runtime import Runtime
 
+    params = _parse_task_params(args.task_params)
     rt = Runtime(window=args.window)
     try:
-        result = rt.run_task(args.task)
+        result = rt.run_task(args.task, **params)
         print(f"[task] {args.task} → {result}")
         return 0
     except Exception as e:

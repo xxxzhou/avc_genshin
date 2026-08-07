@@ -218,6 +218,9 @@ class TestVerify:
             def get_position(self):
                 return (100.0, 200.0)
 
+            def set_prev_position(self, x, y):
+                pass
+
         class MockCam:
             def get_orientation(self):
                 return 90.0

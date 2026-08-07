@@ -42,3 +42,4 @@ config.local.toml
 .vscode/
 .DS_Store
 Thumbs.db
+tests/fixtures/web/**

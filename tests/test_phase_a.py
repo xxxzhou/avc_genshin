@@ -232,9 +232,12 @@ class TestDaemonRegistration:
     def test_auto_open_chest_registered(self):
         assert get_daemon_class("auto_open_chest") is not None
 
+    def test_auto_talk_registered(self):
+        assert get_daemon_class("auto_talk") is not None
+
     def test_all_daemons_count(self):
-        # 旧 5 + 新 3 = 8
-        assert len(list_daemons()) >= 8
+        # 旧 5 + 新 4 = 9（auto_eat/quick_teleport/auto_open_chest/auto_talk）
+        assert len(list_daemons()) >= 9
 
     def test_auto_eat_scenes(self):
         cls = get_daemon_class("auto_eat")
@@ -293,6 +296,57 @@ class TestAutoOpenChestDaemon:
         import asyncio
 
         asyncio.get_event_loop().run_until_complete(inst.step(dctx))
+
+
+class TestAutoTalkDaemon:
+    """auto_talk NPC 交互守护逻辑。"""
+
+    def test_step_no_frame(self):
+        """无帧时不操作。"""
+        cls = get_daemon_class("auto_talk")
+        inst = cls()
+        dctx = _make_dctx()
+        import asyncio
+
+        asyncio.get_event_loop().run_until_complete(inst.step(dctx))
+
+    def test_step_normal_frame_no_press(self):
+        """有帧但无 F 图标 → 不按键。"""
+        cls = get_daemon_class("auto_talk")
+        inst = cls()
+        frame = MockImageBuffer()
+        ctx = MockContext()
+        dctx = _make_dctx(ctx=ctx, frame=frame)
+        import asyncio
+
+        with patch("abilities.game_state.has_pick_f", return_value=False):
+            asyncio.get_event_loop().run_until_complete(inst.step(dctx))
+        assert len(ctx._press_log) == 0
+
+    def test_step_f_icon_presses_f(self):
+        """检测到 F 图标 → 按 F。"""
+        cls = get_daemon_class("auto_talk")
+        inst = cls()
+        frame = MockImageBuffer()
+        ctx = MockContext()
+        dctx = _make_dctx(ctx=ctx, frame=frame)
+        import asyncio
+
+        with patch("abilities.game_state.has_pick_f", return_value=True):
+            asyncio.get_event_loop().run_until_complete(inst.step(dctx))
+        assert "f" in str(ctx._press_log).lower()
+
+    def test_priority_higher_than_auto_pick(self):
+        """auto_talk priority=5 > auto_pick priority=0。"""
+        auto_talk_cls = get_daemon_class("auto_talk")
+        auto_pick_cls = get_daemon_class("auto_pick")
+        assert auto_talk_cls.priority > auto_pick_cls.priority
+
+    def test_scenes_main_ui_only(self):
+        """auto_talk 仅在 MAIN_UI 活跃。"""
+        cls = get_daemon_class("auto_talk")
+        assert Scene.MAIN_UI in cls.scenes
+        assert Scene.DIALOG not in cls.scenes
 
 
 class TestQuickTeleportDaemon:

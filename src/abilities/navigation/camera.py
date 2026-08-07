@@ -12,7 +12,7 @@
 2. 计算与目标角度的差值 diff
 3. 根据 diff 大小选择控制比例 controlRatio:
    |diff| > 90° → 4x, |diff| > 30° → 3x, |diff| > 5° → 2x, else 1x
-4. MoveMouseBy(-controlRatio * diff * dpi, 0) 旋转摄像机
+4. moveBy(-controlRatio * diff * dpi, 0) 旋转摄像机
 """
 
 from __future__ import annotations
@@ -64,8 +64,14 @@ class CameraControl:
         """从截图获取摄像机朝向角度。
 
         走 avc IOrientationDetector（BGI CameraOrientationFromGia 忠实 C++ 移植）。
-        输出为 BGI 原始角度约定（0=右/东，顺时针，实际取值 [45,360]），
-        与 ``target_orientation``（0=北，逆时针）的换算待实机标定。
+        输出 BGI 原始角度约定（0=东，顺时针，取值 [45,360]）。
+
+        与 ``target_orientation`` **同一坐标系**，``_angle_diff`` 直接相减即可，无需换算。
+        依据（2026-08-07 核对 BGI 源码）：① BGI ``CameraRotateTask.RotateToApproach`` 里
+        ``(cao - targetOrientation + 180) % 360 - 180`` 直接相减即工作；② avc 忠实移植 BGI
+        FromGia；③ BGI ``CameraOrientation.ComputeMiniMap`` 让 FromGia 回退输出与新版
+        PredictRotation、``GetTargetOrientation`` 走同一相减（三者同系）。``target_orientation``
+        已数值验证 ≡ BGI ``Navigation.GetTargetOrientation``（acos 版 ≡ atan2 版）。
         """
         if frame is None:
             frame = self.ctx.capture()
@@ -111,7 +117,7 @@ class CameraControl:
         """旋转摄像机到目标角度。返回是否在 max_diff 范围内。
 
         对照 BGI CameraRotateTask.WaitUntilRotatedTo:
-        循环: 获取当前角度 → 计算 diff → MoveMouseBy 旋转
+        循环: 获取当前角度 → 计算 diff → moveBy 旋转
         """
         for _ in range(max_attempts):
             current = self.get_orientation()
@@ -125,7 +131,7 @@ class CameraControl:
             # 计算鼠标移动量
             control_ratio = self._control_ratio(diff)
             move_x = int(round(-control_ratio * diff * self._dpi))
-            self.ctx.ic.moveMouseBy(move_x, 0)
+            self.ctx.ic.moveBy(move_x, 0)
 
             import time
 
@@ -139,7 +145,7 @@ class CameraControl:
         对照 BGI CameraRotateTask.RotateToApproach:
         1. 获取当前角度
         2. 计算 diff
-        3. MoveMouseBy(-controlRatio * diff * dpi, 0)
+        3. moveBy(-controlRatio * diff * dpi, 0)
         """
         current = self.get_orientation()
         if current is None:
@@ -151,7 +157,7 @@ class CameraControl:
 
         control_ratio = self._control_ratio(diff)
         move_x = int(round(-control_ratio * diff * self._dpi))
-        self.ctx.ic.moveMouseBy(move_x, 0)
+        self.ctx.ic.moveBy(move_x, 0)
         return diff
 
     @staticmethod
