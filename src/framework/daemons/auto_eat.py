@@ -1,13 +1,16 @@
 """auto_eat —— 自动吃药/复活（对应 BetterGI AutoEatTrigger，Phase A 新增）。
 
 检测红血 → 使用便携营养袋；检测复活图标 → 自动复活。
-owns_keys={ACTION}、scenes={MAIN_UI, COMBAT, DOMAIN}：仅在可操作场景活跃。
+owns_keys={GADGET}、scenes={MAIN_UI, COMBAT, DOMAIN}：仅在可操作场景活跃。
 
 对照 BGI AutoEatTrigger：
 - 红血检测：像素 (808, 1010) 为红色 (R≈255, G≈90, B≈90)
 - Recovery 图标：便携营养袋不在 CD
 - Resurrection 图标：角色死亡待复活
 - 吃药键：Z（快捷使用小道具，BGI GIActions.QuickUseGadget）
+- 检测间隔：150ms（对齐 BGI CheckInterval）
+- 吃药间隔：1s（对齐 BGI EatInterval）
+- 优先级：25（对齐 BGI AutoEatTrigger.Priority）
 """
 
 from __future__ import annotations
@@ -22,13 +25,14 @@ from framework.scene import Scene
 
 @daemon(
     name="auto_eat",
-    owns_keys={InputChannel.INTERACT},
+    owns_keys={InputChannel.GADGET},
     scenes={Scene.MAIN_UI, Scene.COMBAT, Scene.DOMAIN},
-    interval=1.0,
+    interval=0.15,
+    priority=25,
 )
 class AutoEatDaemon(Daemon):
-    # 吃药间隔（秒），防止频繁吃药
-    eat_interval: float = 5.0
+    # 吃药间隔（秒），防止频繁吃药（对齐 BGI EatInterval 1000ms）
+    eat_interval: float = 1.0
     _last_eat_time: float = 0.0
     # Recovery 缓存（30 秒内不重复检测）
     _recovery_cache_time: float = 0.0
@@ -49,6 +53,10 @@ class AutoEatDaemon(Daemon):
 
         now = time.monotonic()
 
+        # 写入红血状态供 fighter 读取（单写多读，GIL 下布尔引用读原子）
+        low = is_low_hp(dctx.ctx, frame)
+        dctx.shared.low_hp = low
+
         # 检测复活图标（最高优先）
         if has_resurrection_icon(dctx.ctx, frame):
             dctx.ctx.press(KeyCode.z)  # QuickUseGadget
@@ -58,7 +66,7 @@ class AutoEatDaemon(Daemon):
             return
 
         # 检测红血
-        if is_low_hp(dctx.ctx, frame):
+        if low:
             # Recovery 缓存：30 秒内不重复检测
             if now - self._recovery_cache_time >= 30:
                 self._recovery_cached = has_recovery_icon(dctx.ctx, frame)

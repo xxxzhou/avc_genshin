@@ -19,7 +19,9 @@
   ]
 }
 
-注意：BGI 路径的 x/y 是原神地图坐标（position[0], position[2]），Y 轴方向与 tp.json 一致。
+注意：BGI 路径文件的 x/y 是 BGI 地图坐标（BGI X = position[2] = 西轴，BGI Y = position[0] = 北轴，
+见 BGI Waypoint.X = MapPosition.X、MapBack Left 在西轴）。框架统一 (x=北, y=西)，
+``load_path_task`` 已做交换（x←file.y, y←file.x），因此 ``Waypoint.x`` 为北轴、``Waypoint.y`` 为西轴。
 """
 
 from __future__ import annotations
@@ -41,10 +43,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Waypoint:
-    """路径点（对应 BGI Waypoint.cs）。"""
+    """路径点（对应 BGI Waypoint.cs）。
 
-    x: float
-    y: float
+    框架约定：``x`` 为北轴（= position[0]）、``y`` 为西轴（= position[2]）。
+    BGI 文件存 (X=西, Y=北)，由 ``load_path_task`` 交换后构造。
+    """
+
+    x: float  # 北轴（position[0]）
+    y: float  # 西轴（position[2]）
     type: str = "path"  # "teleport" | "path" | "target" | "orientation"
     move_mode: str = "walk"  # "walk" | "fly" | "climb" | "swim"
     action: str = ""  # "" | "fight" | "pick_up" | "stop_flying" | etc.
@@ -72,8 +78,13 @@ class PathTask:
 
 
 def load_path_task(path: Path | str) -> PathTask:
-    """从 BGI 路径 JSON 文件加载 PathTask。"""
-    with open(path, encoding="utf-8") as f:
+    """从 BGI 路径 JSON 文件加载 PathTask。
+
+    坐标轴交换：BGI 文件存 (X=西=position[2], Y=北=position[0])，框架统一
+    (x=北, y=西)，故 x←file.y、y←file.x（2026-08-08 实机核查：原实现直接 x=file.x
+    会把"蒙德凯瑟琳"路径起点解析到须弥草神像；交换后落在蒙德城锚点）。
+    """
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
 
     info_data = data.get("info", {})
@@ -87,8 +98,8 @@ def load_path_task(path: Path | str) -> PathTask:
     for pos in data.get("positions", []):
         waypoints.append(
             Waypoint(
-                x=float(pos.get("x", 0)),
-                y=float(pos.get("y", 0)),
+                x=float(pos.get("y", 0)),  # file.y = 北轴
+                y=float(pos.get("x", 0)),  # file.x = 西轴
                 type=pos.get("type", "path"),
                 move_mode=pos.get("move_mode", "walk"),
                 action=pos.get("action", ""),

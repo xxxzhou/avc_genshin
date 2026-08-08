@@ -1,24 +1,23 @@
-"""摄像机朝向检测与旋转控制（Phase B）。
+"""角色朝向（面朝）检测与旋转控制（Phase B）。
 
-对照 BetterGI:
-- CameraOrientationFromGia.cs: 极坐标展开 + Scharr 边缘检测 + 峰值卷积
-- CameraRotateTask.cs: 旋转摄像机到目标角度
-
-朝向算法已由 avc IOrientationDetector 忠实移植（C++ 实现，更快），
-本模块仅做裁剪+调用+角度换算。旧纯 Python cv2 实现已删除。
-
-旋转算法（BGI CameraRotateTask.RotateToApproach）：
-1. 获取当前摄像机朝向角度
-2. 计算与目标角度的差值 diff
-3. 根据 diff 大小选择控制比例 controlRatio:
-   |diff| > 90° → 4x, |diff| > 30° → 3x, |diff| > 5° → 2x, else 1x
-4. moveBy(-controlRatio * diff * dpi, 0) 旋转摄像机
+实机定论（2026-08-08，cache/diag_* 系列探针）：
+- 旧朝向传感器 ``avc IOrientationDetector``（BGI FromGia 移植）不可用：原神小地图
+  固定北朝上，它把小地图像素微差放大成巨大角度跳变（±600px → ±136°），非相机偏航。
+- 小地图**玩家箭头**是可靠的朝向传感器：对称轴法检测（见 ``arrow.py``），
+  实测连续 ±600px 旋转读数稳定 Δ≈±26.5°/步。
+- 箭头只反映**角色面朝**；原神空闲时面朝与相机偏航独立（转相机箭头不动），
+  须轻推 W 同步 → rotate_to 每轮旋转后轻推再读（闭环收敛）。
+- 旋转标定：move_by_rel 相对移动 +600px → 面朝 +26.5°（facecal3），即
+  **1° ≈ 22.6px**；单次移动封顶 ±600px（大正移 +2000 投递不稳）。
 """
 
 from __future__ import annotations
 
 import math
+import time
 from typing import TYPE_CHECKING
+
+from abilities.navigation import arrow
 
 if TYPE_CHECKING:
     from avc.image import IImageBuffer
@@ -28,18 +27,26 @@ if TYPE_CHECKING:
 
 # ── 1080p 常量 ──
 
-# 小地图区域（对照 BGI MapAssets.MimiMapRect1080P = Rect(62, 19, 212, 212)）
-MINIMAP_X = 62
-MINIMAP_Y = 19
-MINIMAP_W = 212
-MINIMAP_H = 212
-MINIMAP_SIZE = 212  # 正方形边长
+# 小地图区域（实机标定 2026-08-08：环心 (169,154) r≈108；旧 BGI (62,19,212,212) 偏上 29px，
+# 箭头不在中心 → 朝向检测坏。见 position.py 同注释）
+MINIMAP_X = arrow.MINIMAP_X
+MINIMAP_Y = arrow.MINIMAP_Y
+MINIMAP_W = arrow.MINIMAP_W
+MINIMAP_H = arrow.MINIMAP_H
+MINIMAP_SIZE = arrow.MINIMAP_W  # 正方形边长
 
-# 小地图中心（1080p）
-MINIMAP_CENTER_X = MINIMAP_X + MINIMAP_W // 2  # 168
-MINIMAP_CENTER_Y = MINIMAP_Y + MINIMAP_H // 2  # 125
+# 小地图中心（1080p，实机径向剖面测得）
+MINIMAP_CENTER_X = MINIMAP_X + MINIMAP_W // 2  # 169
+MINIMAP_CENTER_Y = MINIMAP_Y + MINIMAP_H // 2  # 154
 
-# 旋转控制参数（对照 BGI CameraRotateTask）
+# 旋转标定与控制参数（实机 2026-08-08）
+_PX_PER_DEG = 22.6      # 1° ≈ 22.6px（facecal3：+600px → +26.5°）
+_MAX_MOVE_PX = 600      # 单次移动封顶（≈26.5°）；大正移 +2000 投递不稳，用已验证的 ±600
+_SETTLE_S = 1.5         # 相机旋转惯性等待（转完停稳再轻推/再读）
+_NUDGE_S = 0.25         # 轻推 W 同步面朝=相机偏航（facecal3 用 0.25s 达 +26.5°）
+_SYNC_S = 0.7           # 轻推后等面朝稳定再读数
+
+# 旧旋转控制比例表（保留：_control_ratio 兼容旧调用方/测试；新 rotate_to 用线性 PX_PER_DEG）
 _ROTATE_CONTROL_RATIOS = [
     (90, 4.0),
     (30, 3.0),
@@ -49,115 +56,124 @@ _ROTATE_CONTROL_RATIOS = [
 
 
 class CameraControl:
-    """摄像机朝向检测与旋转控制。
+    """角色朝向（面朝）检测与旋转控制。
 
-    朝向检测走 avc IOrientationDetector（BGI CameraOrientationFromGia 忠实 C++ 移植）。
-    旋转控制使用鼠标水平移动。
+    朝向检测走小地图玩家箭头对称轴检测（``arrow.py``）；旋转控制使用相对鼠标移动
+    + 轻推 W 同步面朝（见模块 docstring 实机定论）。
     """
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
-        self._dpi: float = ctx._dpi_scale  # Windows DPI 缩放比，从 GameContext 读取
-        self._od = None  # avc IOrientationDetector（懒加载）
 
     def get_orientation(self, frame: IImageBuffer | None = None) -> float | None:
-        """从截图获取摄像机朝向角度。
+        """从截图获取角色朝向（罗盘角 0=北，90=东，顺时针）。
 
-        走 avc IOrientationDetector（BGI CameraOrientationFromGia 忠实 C++ 移植）。
-        输出 BGI 原始角度约定（0=东，顺时针，取值 [45,360]）。
+        走小地图玩家箭头的对称轴检测（``arrow.heading_from_frame``）。
+        **角度约定 = 0=北，顺时针（罗盘）**，与 ``target_orientation`` 同系，
+        ``_angle_diff`` 直接相减即可。
 
-        与 ``target_orientation`` **同一坐标系**，``_angle_diff`` 直接相减即可，无需换算。
-        依据（2026-08-07 核对 BGI 源码）：① BGI ``CameraRotateTask.RotateToApproach`` 里
-        ``(cao - targetOrientation + 180) % 360 - 180`` 直接相减即工作；② avc 忠实移植 BGI
-        FromGia；③ BGI ``CameraOrientation.ComputeMiniMap`` 让 FromGia 回退输出与新版
-        PredictRotation、``GetTargetOrientation`` 走同一相减（三者同系）。``target_orientation``
-        已数值验证 ≡ BGI ``Navigation.GetTargetOrientation``（acos 版 ≡ atan2 版）。
+        注意：读的是**角色面朝**。原神空闲时面朝与相机偏航独立（转相机箭头不动），
+        须轻推 W 同步后才等于相机偏航 → 配对使用 ``rotate_to``（内部同步）。
         """
         if frame is None:
             frame = self.ctx.capture()
         if frame is None:
             return None
-        od = self._get_od()
-        if od is None:
-            return None
-        minimap = self._extract_minimap_buffer(frame)
-        if minimap is None:
-            return None
-        ang = od.compute(minimap)
-        return ang if ang >= 0 else None
-
-    def _get_od(self):
-        """懒建 avc IOrientationDetector（无 avc/插件未装返回 None）。"""
-        if self._od is not None:
-            return self._od
-        try:
-            from avc import Vision
-
-            od = Vision.createOrientationDetector()
-            self._od = od
-            return od
-        except Exception:
-            return None
-
-    def _extract_minimap_buffer(self, frame: IImageBuffer) -> IImageBuffer | None:
-        """裁剪小地图区域，返回 avc IImageBuffer（供 avc IOrientationDetector 直传）。"""
-        try:
-            from avc import Image
-
-            return Image.crop(frame, MINIMAP_X, MINIMAP_Y, MINIMAP_W, MINIMAP_H)
-        except Exception:
-            return None
+        h, _area, _dist, _color = arrow.heading_from_frame(frame)
+        return h
 
     def rotate_to(
         self,
         target_angle: float,
         max_diff: float = 5.0,
-        max_attempts: int = 50,
+        max_attempts: int | None = None,
     ) -> bool:
-        """旋转摄像机到目标角度。返回是否在 max_diff 范围内。
+        """旋转角色面朝到目标角度。返回是否在 max_diff 范围内。
 
-        对照 BGI CameraRotateTask.WaitUntilRotatedTo:
-        循环: 获取当前角度 → 计算 diff → moveBy 旋转
+        闭环（实机验证 cache/diag_rotfix2.py）：读箭头面朝 → 算 diff →
+        ``move_by_rel(-diff*22.6px)`` 转相机 → 等相机停 → 轻推 W 同步面朝=相机 → 再读。
+        - 旋转必须用**相对**鼠标移动（avc moveBy 绝对坐标不触发原神 raw-input 视角）。
+        - 单次移动量 = ``diff * PX_PER_DEG``，封顶 ±600px（≈±26.5°）；大角度多轮收敛。
+        - 每轮轻推 W 会带一点前进位移（~1m/轮），大角度需多轮 → 位置会有漂移，
+          导航层应在旋转后重定位（多功能联调阶段处理）。
+        - max_attempts 缺省按 |diff| 估算（每轮≈26.5°），另 +5 冗余。实机(2026-08-08)：
+          175° 恰好需要 9 步才收敛，且单步偶发 ±200° 异常跳变（撞地形/检测误读），
+          冗余不足会耗尽步数返回 False（diag_rotloop 证实）。+5 缓冲异常。
         """
-        for _ in range(max_attempts):
-            current = self.get_orientation()
+        if max_attempts is None:
+            current = self._read_stable()
             if current is None:
                 return False
+            max_attempts = int(abs(self._angle_diff(current, target_angle)) / 26.0) + 5
 
+        for _ in range(max_attempts):
+            current = self._read_stable()
+            if current is None:
+                return False
             diff = self._angle_diff(current, target_angle)
             if abs(diff) < max_diff:
                 return True
+            move_x = int(round(-diff * _PX_PER_DEG))  # +move_x→面朝增（facecal3），须反向驱动 diff
+            move_x = max(-_MAX_MOVE_PX, min(_MAX_MOVE_PX, move_x))
+            if move_x == 0:
+                move_x = -_MAX_MOVE_PX if diff > 0 else _MAX_MOVE_PX
+            self.ctx.move_by_rel(move_x, 0)
+            time.sleep(_SETTLE_S)  # 等相机旋转结束（惯性 ~1.5s）
+            self._nudge_sync()     # 轻推 W 同步面朝=相机偏航
+        # 最终校验：最后一次 move 可能已收敛但未读数，读一次确认
+        current = self._read_stable()
+        if current is None:
+            return False
+        return abs(self._angle_diff(current, target_angle)) < max_diff
 
-            # 计算鼠标移动量
-            control_ratio = self._control_ratio(diff)
-            move_x = int(round(-control_ratio * diff * self._dpi))
-            self.ctx.ic.moveBy(move_x, 0)
+    def _read_stable(self, tries: int = 3) -> float | None:
+        """连续读箭头朝向取中位数，滤掉噪声（单次读数会跳）。"""
+        vals = []
+        for _ in range(tries):
+            v = self.get_orientation()
+            if v is not None:
+                vals.append(v)
+            time.sleep(0.15)
+        if not vals:
+            return None
+        return float(sorted(vals)[len(vals) // 2])
 
-            import time
+    def _nudge_sync(self) -> None:
+        """轻推 W 同步面朝=相机偏航（原神空闲时二者独立，移动才同步）。
 
-            time.sleep(0.05)
-
-        return False
-
-    def rotate_to_approach(self, target_angle: float) -> float:
-        """单次旋转逼近。返回当前角度差。
-
-        对照 BGI CameraRotateTask.RotateToApproach:
-        1. 获取当前角度
-        2. 计算 diff
-        3. moveBy(-controlRatio * diff * dpi, 0)
+        用 0.25s 短按 W：面朝转到相机方向并前进一点（facecal3 标定同款）。
         """
+        from avc._core import KeyCode
+
+        ic = self.ctx.ic
+        ic.keyDown(KeyCode.w)
+        time.sleep(_NUDGE_S)
+        ic.keyUp(KeyCode.w)
+        time.sleep(_SYNC_S)
+
+    def rotate_camera_to_target(
+        self,
+        from_pos: tuple[float, float],
+        to_pos: tuple[float, float],
+        max_diff: float = 3.0,
+    ) -> float:
+        """移动中朝目标点转相机（纯 move_by_rel，**不 nudge**）。返回未收敛的角度差。
+
+        前提：角色正在移动（W 已按住），**移动中面朝自动同步相机**（实机 diag_moveto [A]：
+        按住 W 时 +600px → 面朝 +21.3°），无需轻推 W，也不打断持续行走。
+        go_to 每轮调此方法持续转向（diag_moveto [B]：dist 单调下降、diff→0）。
+        空闲态需用 ``rotate_to``（内含轻推同步）。
+        """
+        target_angle = CameraControl.target_orientation(from_pos, to_pos)
         current = self.get_orientation()
         if current is None:
             return 0.0
-
         diff = self._angle_diff(current, target_angle)
-        if abs(diff) < 0.01:
-            return 0.0
-
-        control_ratio = self._control_ratio(diff)
-        move_x = int(round(-control_ratio * diff * self._dpi))
-        self.ctx.ic.moveBy(move_x, 0)
+        if abs(diff) < max_diff:
+            return diff
+        move_x = int(round(-diff * _PX_PER_DEG))
+        move_x = max(-_MAX_MOVE_PX, min(_MAX_MOVE_PX, move_x))
+        self.ctx.move_by_rel(move_x, 0)
         return diff
 
     @staticmethod
@@ -167,19 +183,22 @@ class CameraControl:
     ) -> int:
         """计算从 from_pos 到 to_pos 的朝向角度（0-360 度）。
 
-        对照 BGI Navigation.GetTargetOrientation:
-        用 atan2 计算向量角度，转换到 0-360 度范围。
+        输出**真罗盘角**（0=北，90=东，顺时针），与 ``get_orientation``（箭头传感器）同帧。
+        坐标序 (北,西)：dx=Δ北、dy=Δ西；罗盘角 = atan2(-Δ西, Δ北)。
+
+        ⚠ 对照 BGI GetTargetOrientation（2026-08-08 实机定论）：BGI 帧是 atan2(Δ西, Δ北)
+        → 西=90°（逆时针罗盘），其 getOrientation 也用同帧、可相减；但我们弃用 avc
+        getOrientation（小地图固定北朝上 ⇒ 假角度）改用小地图箭头（真罗盘），故此处把
+        第二轴取负转成真罗盘，与箭头同系（见 arrow.py / rotate_to）。
         """
-        dx = to_pos[0] - from_pos[0]
-        dy = to_pos[1] - from_pos[1]
+        dx = to_pos[0] - from_pos[0]      # Δ北
+        dy = -(to_pos[1] - from_pos[1])   # Δ东 = -Δ西（换真罗盘帧）
 
         if dx == 0 and dy == 0:
             return 0
 
-        # atan2(dy, dx) → 角度（弧度）
-        angle = math.atan2(dy, dx)
-        # 转换到 0-360 度
-        degrees = math.degrees(angle)
+        # atan2(dy, dx) → 角度（弧度）→ 0-360 度
+        degrees = math.degrees(math.atan2(dy, dx))
         if degrees < 0:
             degrees += 360
 

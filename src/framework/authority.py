@@ -30,6 +30,7 @@ class InputChannel(str, Enum):
     INTERACT = "interact"  # F（交互/拾取）
     COMBAT = "combat"  # E/Q/普攻/num1~4（战斗）
     MENU = "menu"  # Esc/M/Tab/J（开菜单）
+    GADGET = "gadget"  # Z（快捷使用小道具/便携营养袋）
     MOUSE_MOVE = "mouse_move"
     MOUSE_CLICK = "mouse_click"
 

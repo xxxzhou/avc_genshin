@@ -1,14 +1,13 @@
 """摄像机朝向/旋转数学正确性测试（纯数学，无 avc/游戏/mock 依赖）。
 
-锁定 2026-08-07 的核对结论：
-  get_orientation（avc / BGI FromGia 移植）与 target_orientation（atan2，≡ BGI
-  Navigation.GetTargetOrientation）**同一坐标系**，_angle_diff 直接相减即可，无需换算。
-依据：BGI CameraRotateTask.RotateToApproach 里 (cao - targetOrientation) 直接相减；
-FromGia 回退输出 / PredictRotation / GetTargetOrientation 三者在 BGI 走同一相减。
+2026-08-08 实机定论更新：avc getOrientation（BGI FromGia 移植）不可用（原神小地图固定
+北朝上，把微差放大成假角度），改走小地图箭头传感器（arrow.py，**真罗盘 0=北/90=东**）。
+因此 target_orientation 从 BGI 帧（atan2(Δ西,Δ北)，西=90°）改为**真罗盘帧**
+（atan2(-Δ西,Δ北)，东=90°），与 get_orientation（箭头）同系、_angle_diff 直接相减。
 
 本文件只测纯数学（target_orientation / _angle_diff / _control_ratio）——这些是静态方法，
-不需实例化 CameraControl，不需 avc。get_orientation 的数值正确性（avc 端）依赖真实小地图图，
-归「离线能力验证套件」/ 实机标定，不在本文件。
+不需实例化 CameraControl，不需 avc。get_orientation 的数值正确性（箭头端）归离线套件/
+实机标定，不在本文件。
 """
 
 from __future__ import annotations
@@ -18,13 +17,14 @@ import math
 from abilities.navigation.camera import CameraControl
 
 
-# ── BGI 公式独立重算（对照基线）──
+# ── acos 角参考（对照基线）──
 
 
 def _bgi_get_target_orientation(dx: float, dy: float) -> int:
-    """BGI Navigation.GetTargetOrientation 的 acos 实现（源码逐行照搬，作对照基线）。
+    """BGI Navigation.GetTargetOrientation 的 acos 数学式（作纯角参考，非 BGI 轴序）。
 
     源码：angle = acos(dx/len)；dy<0 → 2π-angle；int(angle*180/π)。
+    本测试把它当「atan2(dy,dx) 的角度」参考；调用方按目标帧传 (Δ北, Δ东)。
     """
     length = math.hypot(dx, dy)
     if length == 0:
@@ -35,42 +35,45 @@ def _bgi_get_target_orientation(dx: float, dy: float) -> int:
     return int(angle * (180.0 / math.pi))
 
 
-# ── target_orientation ≡ BGI GetTargetOrientation ──
+# ── target_orientation ≡ 真罗盘（0=北，90=东）──
 
 
 class TestTargetOrientation:
-    """target_orientation(from, to) 必须数值等于 BGI Navigation.GetTargetOrientation。"""
+    """target_orientation(from, to) 输出真罗盘角（0=北/90=东/180=南/270=西）。
+
+    坐标序 (北,西)：+y=+西→270，-y=+东→90（与 get_orientation 箭头同帧）。
+    """
 
     def test_cardinal_directions(self):
-        """四正方向：+x→0 / +y→90 / -x→180 / -y→270。"""
-        assert CameraControl.target_orientation((0, 0), (1, 0)) == 0
-        assert CameraControl.target_orientation((0, 0), (0, 1)) == 90
-        assert CameraControl.target_orientation((0, 0), (-1, 0)) == 180
-        assert CameraControl.target_orientation((0, 0), (0, -1)) == 270
+        """四正方向：+北→0 / +东→90 / +南→180 / +西→270。"""
+        assert CameraControl.target_orientation((0, 0), (1, 0)) == 0      # +北
+        assert CameraControl.target_orientation((0, 0), (0, -1)) == 90    # +东
+        assert CameraControl.target_orientation((0, 0), (-1, 0)) == 180   # +南
+        assert CameraControl.target_orientation((0, 0), (0, 1)) == 270    # +西
 
     def test_diagonal_directions(self):
-        assert CameraControl.target_orientation((0, 0), (1, 1)) == 45
-        assert CameraControl.target_orientation((0, 0), (1, -1)) == 315
-        assert CameraControl.target_orientation((0, 0), (-1, 1)) == 135
-        assert CameraControl.target_orientation((0, 0), (-1, -1)) == 225
+        assert CameraControl.target_orientation((0, 0), (1, -1)) == 45    # 东北
+        assert CameraControl.target_orientation((0, 0), (1, 1)) == 315    # 西北
+        assert CameraControl.target_orientation((0, 0), (-1, -1)) == 135  # 西南
+        assert CameraControl.target_orientation((0, 0), (-1, 1)) == 225   # 东南
 
-    def test_equivalent_to_bgi_acos_formula(self):
-        """我们的 atan2 实现 ≡ BGI acos 实现（多组向量，含各象限）。"""
+    def test_matches_compass_reference(self):
+        """罗盘角 = atan2(Δ东, Δ北) = atan2(-Δ西, Δ北)；acos 数学式作参考（第二轴取负）。"""
         vectors = [
             (3, 4), (-3, 4), (3, -4), (-3, -4),
             (5, 0), (0, 5), (-5, 0), (0, -5),
             (1, 100), (-100, 1), (7, -7), (-7, -7),
             (8, 15), (-8, 15), (8, -15), (-8, -15),
         ]
-        for dx, dy in vectors:
+        for dx, dy in vectors:  # dx=Δ北, dy=Δ西
             ours = CameraControl.target_orientation((0, 0), (dx, dy))
-            bgi = _bgi_get_target_orientation(dx, dy)
-            assert ours == bgi, f"({dx},{dy}): ours={ours} bgi_acos={bgi}"
+            ref = _bgi_get_target_orientation(dx, -dy)  # 换轴：(Δ北, Δ东=-Δ西)
+            assert ours == ref, f"({dx},{dy}): ours={ours} ref={ref}"
 
     def test_uses_delta_from_nonzero_origin(self):
         """非原点起点按差向量算。"""
-        assert CameraControl.target_orientation((10, 10), (11, 10)) == 0   # 向 +x
-        assert CameraControl.target_orientation((10, 10), (10, 11)) == 90  # 向 +y
+        assert CameraControl.target_orientation((10, 10), (11, 10)) == 0    # 北
+        assert CameraControl.target_orientation((10, 10), (10, 11)) == 270  # 西
 
     def test_same_point_is_zero(self):
         """同点 → 0（不除零）。"""

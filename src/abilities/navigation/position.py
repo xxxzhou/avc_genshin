@@ -45,49 +45,55 @@ class _MapLayer:
 
     坐标系（对照 BGI BaseMapLayerByTemplateMatch.WorldToMap/MapToWorld）：
     - 图像坐标增大 → 游戏坐标减小（翻转）
-    - 粗匹配: game_x = Left - px * RoughZoom / Scale, RoughZoom=5
-    - 精匹配: game_x = Left - px * ExactZoom / Scale, ExactZoom=1
+    - 粗匹配: game_x(西) = Left - px * RoughZoom / Scale, RoughZoom=5
+    - 精匹配: game_x(西) = Left - px * ExactZoom / Scale, ExactZoom=1
+    - ⚠ 换轴：Left 在西轴（BGI X = position[2]），Top 在北轴（BGI Y = position[0]）；
+      coarse_to_game 返回 (北, 西) 序，与 get_position_from_big_map/_map256_to_game 一致
     - IMapMatcher 返回的 (px, py) 已是中心坐标（MapMatcher.cpp 加了 coarseSize/2）
     """
 
     layer_id: str
-    left: float  # 世界坐标原点 X（mapback_info.json Left）
-    top: float  # 世界坐标原点 Y（mapback_info.json Top）
+    left: float  # 西轴原点（mapback_info.json Left，= BGI X = position[2]）
+    top: float  # 北轴原点（mapback_info.json Top，= BGI Y = position[0]）
     scale: float = 1.0  # 缩放（mapback_info.json Scale）
     mm: IMapMatcher | None = field(default=None, repr=False)  # avc IMapMatcher 实例
-    # 覆盖范围（游戏坐标，从彩图尺寸 + BGI 翻转公式计算）
+    # 覆盖范围（西轴 right / 北轴 bottom，从彩图尺寸 + BGI 翻转公式计算）
     right: float = 0.0
     bottom: float = 0.0
 
-    def contains(self, gx: float, gy: float) -> bool:
-        """游戏坐标是否在该层覆盖范围内。
+    def contains(self, north: float, west: float) -> bool:
+        """玩家坐标 (北向, 西向) 是否在该层覆盖范围内。
 
-        BGI 翻转坐标系：px=0 → game=Left/Top（最大），px=width → game 最小。
-        所以 game_x 范围是 [left - width*zoom/scale, left]。
+        left/right 在西轴、top/bottom 在北轴。BGI 翻转坐标系：px=0 → West=Left
+        （最大），px=width → West 最小；所以 West 范围是 [right, left]。
         """
         if self.right == self.left and self.bottom == self.top:
             return True  # 无范围信息时不排除
-        # right < left（翻转），所以范围是 [right, left]
-        x_ok = min(self.right, self.left) <= gx <= max(self.right, self.left)
-        y_ok = min(self.bottom, self.top) <= gy <= max(self.bottom, self.top)
-        return x_ok and y_ok
+        west_ok = min(self.right, self.left) <= west <= max(self.right, self.left)
+        north_ok = min(self.bottom, self.top) <= north <= max(self.bottom, self.top)
+        return west_ok and north_ok
 
     def coarse_to_game(self, px: float, py: float) -> tuple[float, float]:
-        """coarseMap 像素坐标（中心）→ 游戏坐标。
+        """coarseMap 像素坐标（中心）→ 玩家坐标 (北向, 西向)。
 
-        对照 BGI MapToWorld: game_x = Left - (pos.X + miniMapSize/2) * zoom / Scale
+        对照 BGI MapToWorld: game_x(西) = Left - px * zoom / Scale,
+        game_y(北) = Top - py * zoom / Scale。⚠ 返回 (北, 西) 序（换轴），
+        与 get_position_from_big_map 的 (position[0], position[2]) 一致。
         IMapMatcher 返回的 px/py 已含 coarseSize/2 偏移，无需再加。
         """
-        return (self.left - px * _ROUGH_ZOOM / self.scale,
-                self.top - py * _ROUGH_ZOOM / self.scale)
+        west = self.left - px * _ROUGH_ZOOM / self.scale
+        north = self.top - py * _ROUGH_ZOOM / self.scale
+        return (north, west)
 
-    def game_to_coarse(self, gx: float, gy: float) -> tuple[float, float]:
-        """游戏坐标 → coarseMap 像素坐标（coarse_to_game 的逆）。
+    def game_to_coarse(self, north: float, west: float) -> tuple[float, float]:
+        """玩家坐标 (北向, 西向) → coarseMap 像素坐标（coarse_to_game 的逆）。
 
-        对照 BGI WorldToMap: map_x = (Left - pos.X) * Scale / zoom
+        对照 BGI WorldToMap: map_x(西→px) = (Left - West) * Scale / zoom,
+        map_y(北→py) = (Top - North) * Scale / zoom。
         """
-        return ((self.left - gx) * self.scale / _ROUGH_ZOOM,
-                (self.top - gy) * self.scale / _ROUGH_ZOOM)
+        px = (self.left - west) * self.scale / _ROUGH_ZOOM
+        py = (self.top - north) * self.scale / _ROUGH_ZOOM
+        return (px, py)
 
 
 # ── 提瓦特地图参数（对照 BGI TeyvatMap.cs）──
@@ -105,11 +111,15 @@ TEYVAT_ORIGIN_Y = (TEYVAT_MAP_UP_ROWS + 1) * TEYVAT_MAP_BLOCK_WIDTH
 # 缩放比例: block_width / 1024
 TEYVAT_SCALE = TEYVAT_MAP_BLOCK_WIDTH / 1024.0
 
-# 1080p 小地图区域（对照 BGI MapAssets.MimiMapRect1080P = Rect(62, 19, 212, 212)）
-MINIMAP_X = 62
-MINIMAP_Y = 19
-MINIMAP_W = 212
-MINIMAP_H = 212
+# 1080p 小地图区域。
+# 实机标定(2026-08-08)：原 BGI Rect(62,19,212,212) 中心 (168,125) 在本版本偏上 ~29px——
+# 对 2 帧(cache/map_t0, map_p1)做径向剖面(hue/V)均测得环心 (169,154)、环带 r≈105-111；
+# 玩家箭头(青色三角)在环心处。旧 rect 顶部裁进顶部 UI 条(0..44)、底部切掉圆圈，
+# 中心裁 156 后箭头偏离中心 34px(旧) vs 9px(新) → 朝向检测与小地图匹配全坏。
+MINIMAP_X = 61
+MINIMAP_Y = 46
+MINIMAP_W = 216
+MINIMAP_H = 216
 
 # ── 256 缩放全地图（BigMapTeyvat256Layer / TeyvatMap）──
 MAP256_IMAGE = "Assets/Map/Teyvat/Teyvat_0_256.png"  # res.map 相对路径（gitignored）
@@ -783,14 +793,15 @@ class PositionGetter:
         """coarseMap 像素坐标 → 游戏坐标（默认第 0 层，兼容旧接口）。"""
         if layer_idx < len(self._layers):
             return self._layers[layer_idx].coarse_to_game(px, py)
-        # 回退: MapBack_0 硬编码（BGI 翻转公式）
-        return (12384.0 - px * _ROUGH_ZOOM, 1024.0 - py * _ROUGH_ZOOM)
+        # 回退: MapBack_0 硬编码（BGI 翻转公式；换轴返回 (北, 西)）
+        return (1024.0 - py * _ROUGH_ZOOM, 12384.0 - px * _ROUGH_ZOOM)
 
     def _game_to_coarse(self, gx: float, gy: float, layer_idx: int = 0) -> tuple[float, float]:
         """游戏坐标 → coarseMap 像素坐标（默认第 0 层，兼容旧接口）。"""
         if layer_idx < len(self._layers):
             return self._layers[layer_idx].game_to_coarse(gx, gy)
-        return ((12384.0 - gx) / _ROUGH_ZOOM, (1024.0 - gy) / _ROUGH_ZOOM)
+        # 回退: MapBack_0 硬编码（(gx,gy)=(北,西)；换轴后 px 由西向 gy 算）
+        return ((12384.0 - gy) / _ROUGH_ZOOM, (1024.0 - gx) / _ROUGH_ZOOM)
 
     @staticmethod
     def image_to_game_coords(

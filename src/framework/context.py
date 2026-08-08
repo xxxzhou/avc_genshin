@@ -393,6 +393,32 @@ class GameContext:
         self.ensure_foreground()
         self.ic.typeText(text)
 
+    def move_by_rel(self, dx: float, dy: float, steps: int | None = None) -> None:
+        """相对鼠标移动（摄像机旋转专用）。
+
+        ⚠️ avc ``ic.moveBy`` 是**绝对坐标**移动（MOUSEEVENTF_ABSOLUTE），原神 raw-input
+        视角只认相对位移，绝对移动不旋转摄像机（实机验证见 utils.send_rel_mouse）。
+        旋转一律走本方法：分 steps 步发送，拟人 ±1px 抖动（末步补齐余数，总位移精确
+        等于 (dx, dy)）。
+        """
+        self.ensure_foreground()
+        n = int(steps) if steps else max(1, self.cfg.move_steps)
+        rx, ry = int(round(dx)), int(round(dy))
+        total_x = total_y = 0
+        for i in range(n):
+            if i == n - 1:
+                sx, sy = rx - total_x, ry - total_y
+            else:
+                sx = round(rx * (i + 1) / n) - total_x
+                sy = round(ry * (i + 1) / n) - total_y
+                if self._humanize_on():
+                    sx += utils.rng().randint(-1, 1)
+                    sy += utils.rng().randint(-1, 1)
+            total_x += sx
+            total_y += sy
+            utils.send_rel_mouse(sx, sy)
+            utils.sleep(self.cfg.move_duration_ms / 1000.0 / n)
+
     # ── 运行时控制（委托 Runtime；Runtime 构造时绑定 self.runtime）──
 
     runtime = None  # Runtime 构造时设置（ctx.runtime = self），见 runtime.py

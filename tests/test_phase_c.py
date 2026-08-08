@@ -59,6 +59,7 @@ class MockContext:
     def __init__(self, frame=None):
         self.cfg = MagicMock()
         self.ic = MagicMock()
+        self.move_by_rel = MagicMock()  # 旋转用相对移动（avc moveBy 绝对坐标不触发原神视角）
         self._frame = frame
 
     def capture(self):
@@ -367,7 +368,7 @@ class TestFighterSeek:
         monkeypatch.setattr(f, "find_nearest_enemy", lambda: None)
         r = f.seek_enemy(max_turns=3)
         assert r is None
-        assert ctx.ic.moveBy.call_count == 3  # 每次盲转一档
+        assert ctx.move_by_rel.call_count == 3  # 每次盲转一档
 
     def test_seek_aligns_to_blood_bar(self, monkeypatch):
         from abilities.fighter import SimpleFighter
@@ -379,7 +380,7 @@ class TestFighterSeek:
         monkeypatch.setattr(f, "find_nearest_enemy", lambda: next(calls))
         r = f.seek_enemy(max_turns=3)
         assert r is not None
-        assert ctx.ic.moveBy.call_count == 2  # 盲转 1 次 + 对准 1 次
+        assert ctx.move_by_rel.call_count == 2  # 盲转 1 次 + 对准 1 次
 
     def test_fight_until_clear_seeks_before_conclude(self, monkeypatch):
         from abilities.fighter import SimpleFighter
@@ -409,6 +410,7 @@ class TestFighterDeathRecovery:
         monkeypatch.setattr(
             "abilities.game_state.has_resurrection_icon", lambda ctx, frame=None: True
         )
+        monkeypatch.setattr(f, "_find_nearest_goddess", lambda: None)
         with pytest.raises(Retry):
             f.recover_on_death()
         g.teleport_to.assert_called_once_with("七天神像-风")

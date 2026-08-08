@@ -109,6 +109,55 @@ def scale_to_native(x: float, y: float, cur_w: int, cur_h: int) -> tuple[float, 
     return x * NATIVE_W / cur_w, y * NATIVE_H / cur_h
 
 
+# ── 输入原语：相对鼠标移动（摄像机旋转必需）──
+
+
+def send_rel_mouse(dx: float, dy: float) -> bool:
+    """发送**相对**鼠标移动 (dx, dy)（Windows SendInput，MOUSEEVENTF_MOVE）。
+
+    ⚠️ 为什么需要：avc ``moveBy`` 走 ``sendAbs``（MOUSEEVENTF_ABSOLUTE 绝对坐标），
+    而原神等 raw-input 游戏**只认相对位移**做摄像机视角，绝对移动不触发旋转。
+    实机验证(cache/diag_relmove.py)：相对 +800 → get_orientation 35°→116°(Δ+81°)；
+    同量绝对 moveBy → 朝向纹丝不动(diag_rot2)。故旋转一律走本函数。
+    SendInput 相对移动会累加真实光标位置，但游戏捕获鼠标时隐藏光标，无副作用。
+    """
+    try:
+        import ctypes
+        import sys
+
+        if sys.platform != "win32":
+            return False
+
+        class _INPUT(ctypes.Structure):
+            class _UNION(ctypes.Union):
+                class _MI(ctypes.Structure):
+                    _fields_ = [
+                        ("dx", ctypes.c_long),
+                        ("dy", ctypes.c_long),
+                        ("mouseData", ctypes.c_ulong),
+                        ("dwFlags", ctypes.c_ulong),
+                        ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+                    ]
+
+                _fields_ = [("mi", _MI)]
+
+            _anonymous_ = ("union",)
+            _fields_ = [("type", ctypes.c_ulong), ("union", _UNION)]
+
+        inp = _INPUT()
+        inp.type = 0  # INPUT_MOUSE
+        inp.mi.dx = int(round(dx))
+        inp.mi.dy = int(round(dy))
+        inp.mi.dwFlags = 0x0001  # MOUSEEVENTF_MOVE（无 ABSOLUTE → 相对位移）
+        return (
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+            == 1
+        )
+    except Exception:
+        return False
+
+
 # ── 文件系统 ──
 
 

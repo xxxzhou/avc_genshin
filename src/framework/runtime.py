@@ -138,7 +138,12 @@ class Runtime:
         timeout: float | None = 600,
         daemons: tuple[str, ...] = (),
     ) -> Any:
-        """跑同步 ``fn(ctx, g)``。daemons: 起始自动挂载的守护名（@task.daemons）。"""
+        """跑同步 ``fn(ctx, g)``。daemons: 起始自动挂载的守护名（@task.daemons）。
+
+        基础守护 ``frame``+``scene_estimator`` 始终挂载：场景估计依赖 frame，而
+        ``g.scene``/``wait_scene``/``teleport_to`` 依赖 shared.scene。若不挂，场景恒为
+        None，地图导航会被跳过、传送落点错误（2026-08-08 实机定位）。
+        """
         from framework.daemons.base import DaemonCtx
         from framework.high_level_api import HighLevelApi
 
@@ -158,7 +163,7 @@ class Runtime:
         self._notify_task = task_name
         notify("task_start", task=task_name)
 
-        for d in daemons:
+        for d in ("frame", "scene_estimator", *daemons):
             try:
                 self.mount(d)
             except Exception as e:

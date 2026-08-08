@@ -38,10 +38,12 @@ if TYPE_CHECKING:
 
 # ── 常量 ──
 
-_ARRIVE_DISTANCE = 4.0  # 到达距离阈值
+# 到达距离阈值。实机（2026-08-08 diag_moveto）：移动中 get_position 相邻采样噪声 ~±4 单位，
+# dist<4 会与噪声同量级、可能振荡不触发；取 ~2× 噪声余量。
+_ARRIVE_DISTANCE = 8.0
 _TOO_FAR_DISTANCE = 500.0  # 过远距离阈值
 _MOVE_TIMEOUT = 240.0  # 移动超时(秒)
-_ROTATE_MAX_DIFF = 5.0  # 旋转精度(度)
+_STEER_SLEEP_S = 0.25  # 每轮转向后等待（相机转完 + 角色转向；diag_moveto 用 0.4s 收敛）
 _POSITION_RECORD_INTERVAL = 1.0  # 位置记录间隔(秒)
 _JUMP_INTERVAL_S = 2.0  # jump 移动模式周期跳间隔
 
@@ -69,10 +71,12 @@ class Navigator:
     ) -> bool:
         """走到指定路径点。返回是否到达。
 
-        对照 BGI PathExecutor.MoveTo:
+        实机定论（2026-08-08 diag_moveto）：**移动中面朝自动同步相机**，故本循环
+        「按住 W 持续走 + 每轮 ``rotate_camera_to_target`` 纯 move_by_rel 转相机转向」
+        （不轻推 W、不打断行走）。对照 BGI PathExecutor.MoveTo:
         1. 获取当前位置
-        2. 旋转朝向目标
-        3. 按住 W 前进
+        2. 计算朝向（真罗盘，见 camera.target_orientation）
+        3. 按住 W 前进，边走边转相机对准目标
         4. 循环检测距离/卡死/超时
         5. 到达后松开 W
         """
@@ -92,12 +96,8 @@ class Navigator:
             is_jump = mode == "jump"  # 周期跳
             last_jump = start_time
 
-            # 初始朝向
-            position = self._position_getter.get_position()
-            if position is not None:
-                target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
-                self._camera.rotate_to(target_angle, max_diff=_ROTATE_MAX_DIFF)
-
+            # 不做初始 rotate_to（空闲大角度旋转会轻推走路撞地形）；移动循环里用
+            # rotate_camera_to_target 边走边转向（移动中面朝自动同步相机，见 camera.py）。
             # fly: 先跳起进入滑翔（实机验证空格键进入滑翔）
             if mode == "fly":
                 try:
@@ -174,11 +174,10 @@ class Navigator:
                         pass
                     last_jump = time.monotonic()
 
-                # 旋转朝向目标
-                target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
-                self._camera.rotate_to_approach(target_angle)
+                # 转向：移动中纯相机旋转（不 nudge、不打断 W；面朝自动同步相机）
+                self._camera.rotate_camera_to_target(position, (waypoint.x, waypoint.y))
 
-                time.sleep(0.05)
+                time.sleep(_STEER_SLEEP_S)
 
             return False  # 超时
 

@@ -132,13 +132,19 @@ def _find_template(
 
 
 def _pixel_bgra(frame: "IImageBuffer", x: int, y: int) -> tuple[int, int, int, int]:
-    """取帧 (x, y) 处 BGRA8 像素。返回 (B, G, R, A)。"""
+    """取帧 (x, y) 处像素。返回 (B, G, R, A)。
+
+    实机标定（2026-08-08）：avc ``to_bytes()`` 返回 **RGBA8**（首字节=R，
+    SourcePlayer 输出 imageType=rgba8），不是文档写的 BGRA8。若按 BGRA8 解包，
+    R/B 通道交换 → 红血/橙色等颜色检测全部失效。此处按 RGBA 解包后转成 BGR 返回，
+    调用方无需感知字节序。
+    """
     raw = frame.to_bytes()
     w = frame.width
     offset = (y * w + x) * 4
     if offset + 4 > len(raw):
         return (0, 0, 0, 0)
-    b, g, r, a = struct.unpack_from("BBBB", raw, offset)
+    r, g, b, a = struct.unpack_from("BBBB", raw, offset)
     return (b, g, r, a)
 
 
@@ -374,7 +380,8 @@ def is_orange_option(frame: "IImageBuffer", x: int, y: int, w: int, h: int) -> b
     """判断矩形区域内是否为橙色文字（重要选项）。
 
     BGI 逻辑：BGR 阈值 (48,195,243)-(55,205,255)，白色占比 > 6%。
-    注意：BGI 用 BGR，我们用 BGRA8 bytes，所以 B=48..55, G=195..205, R=243..255。
+    注意：BGI 用 BGR；avc ``to_bytes()`` 实机标定返回 RGBA8（首字节=R），
+    故解包得到 (r,g,b)，转 BGR 后判断 B=48..55, G=195..205, R=243..255。
     """
     raw = frame.to_bytes()
     fw = frame.width
@@ -385,7 +392,7 @@ def is_orange_option(frame: "IImageBuffer", x: int, y: int, w: int, h: int) -> b
             offset = (py * fw + px) * 4
             if offset + 3 >= len(raw):
                 continue
-            b, g, r, _ = struct.unpack_from("BBBB", raw, offset)
+            r, g, b, _ = struct.unpack_from("BBBB", raw, offset)
             total += 1
             if 48 <= b <= 55 and 195 <= g <= 205 and 243 <= r <= 255:
                 orange += 1

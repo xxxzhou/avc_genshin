@@ -294,12 +294,28 @@ class HighLevelApi:
     # ── 战斗（领域能力，Phase C）──
 
     def has_enemy(self) -> bool:
-        """即时血条检测（红色色块）。不读 shared.detections（bgi_world 是否含稳定
-        “敌人”类未验证）；血条是战斗专属可靠信号。详见 abilities/fighter.py。"""
+        """即时血条检测（红色色块）= 战斗态敌人。详见 abilities/fighter.py。"""
         from abilities.fighter import SimpleFighter
 
         fighter = SimpleFighter(self.ctx, self)
         return self._call(_run(fighter.has_enemy), timeout=10)
+
+    def scan_enemies(self, conf: float | None = None):
+        """世界敌人识别（bgi_world ``"enemy identify"``）→ 敌人列表（含发呆态）。
+
+        血条检测只认战斗态；巡逻/扫描用这个才能“看到”发呆的怪。每个元素是
+        Detection（x1,y1,x2,y2,score,name,cx,cy,w,h）。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        return self._call(_run(fighter.find_enemies, conf=conf), timeout=15)  # 首次懒加载 ONNX
+
+    def has_enemy_in_world(self, conf: float | None = None) -> bool:
+        """屏幕上是否有世界敌人（含发呆态）。"""
+        from abilities.fighter import SimpleFighter
+
+        fighter = SimpleFighter(self.ctx, self)
+        return self._call(_run(fighter.has_enemy_in_world, conf=conf), timeout=15)
 
     def find_nearest_enemy(self):
         """最近敌人（血条框，截图缓冲坐标系），无则 None。"""
@@ -314,6 +330,10 @@ class HighLevelApi:
 
         fighter = SimpleFighter(self.ctx, self)
         return self._call(_run(fighter.is_q_ready), timeout=15)  # 首次懒加载 ONNX，给足
+
+    def is_low_hp(self) -> bool:
+        """当前角色红血（读 SharedState，auto_eat 守护 150ms 写入）。"""
+        return self.runtime.shared.low_hp
 
     def fight(self, duration_s: float = 30, rotation: list | None = None) -> None:
         """站桩连招（阻塞 duration_s 或敌人清场）。rotation 见 fighter.DEFAULT_ROTATION。"""
@@ -358,6 +378,6 @@ class HighLevelApi:
         return self._decider.decide(question, schema or {}, context)
 
 
-async def _run(fn, *args):
+async def _run(fn, *args, **kwargs):
     """把同步 abilities 调用包成协程（在 loop 线程执行，avc 安全）。"""
-    return fn(*args)
+    return fn(*args, **kwargs)

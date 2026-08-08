@@ -2,9 +2,11 @@
 
 对照 BetterGI AutoFight（``GameTask/AutoFight/``），借鉴其视觉策略，摒弃脚本引擎/复杂调度：
 
-- **敌人检测 = 红色血条色块**（``AvatarRecognition.FindBloodBars``）：avc ``IColorDetector``
-  BGR(255,90,90) 精确匹配 + 连通域（下沉 avc_opencv）。不用 bgi_world YOLO（其是否含稳定
-  “敌人”类未验证）；血条是战斗专属的可靠信号。
+- **敌人检测（战斗态） = 红色血条色块**（``AvatarRecognition.FindBloodBars``）：avc ``IColorDetector``
+  BGR(255,90,90) 精确匹配 + 连通域（下沉 avc_opencv）。血条是战斗专属的可靠信号。
+- **世界敌人检测（含发呆态） = bgi_world YOLO ``"enemy identify"``**：已实机验证（风起地东 60，
+  帧内 265 帧检出 enemy identify×15 / health bar×16，conf 0.74~0.96）。注意类名**带空格**，
+  ``detect()`` 的 key 是 ``"enemy identify"``/``"health bar"``，不是下划线。巡逻扫描用 ``find_enemies()``。
 - **Q 就绪** = ``q_classify_sim.onnx``（ROI 右下 Q 图标，类别含 ``"energy 1 cd 0"``）。
 - **角色识别** = ``avatar_side_classify_sim.onnx``（右侧侧栏 4 头像）。
 - **当前出战** = ``AvatarIndexRectList`` 非白块（右侧编号块，白=未出战）。
@@ -18,10 +20,11 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import TYPE_CHECKING
 
-from abilities.detector import GenshinDetector
+from abilities.detector import Detection, GenshinDetector
 from abilities.vision_utils import Rect
 from framework import utils
 from framework.resources import res
@@ -53,12 +56,13 @@ _AVATAR_SIDE_ROIS = [  # AvatarSideIconRectList：右侧 4 个头像（单人 4 
     (1765, 225, 76, 76), (1765, 315, 76, 76),
     (1765, 410, 76, 76), (1765, 500, 76, 76),
 ]
-_AVATAR_INDEX_ROIS = [  # AvatarIndexRectList：右侧 4 个编号块（白=未出战）
-    (1859, 256, 28, 24), (1859, 352, 28, 24),
-    (1859, 448, 28, 24), (1859, 544, 28, 24),
+_AVATAR_INDEX_ROIS = [  # 右侧 4 个编号“药丸块”：非出战=白底黑字，出战=无药丸(≈空)
+    (1859, 248, 28, 48), (1859, 344, 28, 48),
+    (1859, 440, 28, 48), (1859, 536, 28, 48),
 ]
-_INDEX_WHITE_GRAY = (251, 255)  # 灰度落在此区间视为“白”（BGI CountGrayMatColor）
-_INDEX_WHITE_RATIO = 0.5  # 白占比 > 此值 → 该位未出战
+_INDEX_WHITE_GRAY = (251, 255)  # 药丸白底（BGI CountGrayMatColor(251,255)）
+_INDEX_BLACK_GRAY = (50, 54)   # 药丸黑字（BGI CountGrayMatColor(50,54)）
+_INDEX_ACTIVE_GAP = 0.08       # 出战槽药丸与次弱槽的 w+b 差 ≥ 此值 → 认定出战
 _AVATAR_CONF_THRESH = 0.7  # BGI ClassifyAvatarName 阈值（琴/衣装放宽，这里简化统一）
 
 # ── 连招节奏（对照 BGI Avatar.Attack / UseSkill / UseBurst）──
@@ -79,6 +83,10 @@ _STEP_DEADLINE_CHECK = True  # rotation 每步前查 deadline/敌人
 _SEEK_TURN_PX = 60  # 单次水平转视角量（moveBy；实机验证步长/方向）
 _SEEK_MAX_TURNS = 8  # 判清场前最多转几次找敌
 _SEEK_ALIGN_TOL = 50  # 血条中心与屏幕中心水平偏差阈值（内视为已对准）
+
+# ── 生存检查（对照 BGI AutoEatTrigger + Avatar.ThrowWhenDefeated）──
+
+_LOW_HP_SWITCH_COOLDOWN = 3.0  # 换人冷却（秒），防止频繁切换
 
 
 # ── 默认连招（站桩通用；rotation = [(action, *args), ...]）──
@@ -111,6 +119,8 @@ class SimpleFighter:
         # 懒建：模型加载慢，避免不调用识别时白建
         self._q_clf: GenshinDetector | None = None
         self._avatar_clf: GenshinDetector | None = None
+        self._world_det: GenshinDetector | None = None
+        self._last_hp_switch_time: float = 0.0  # 换人冷却
 
     # ── 懒加载分类器 ──
 
@@ -124,7 +134,30 @@ class SimpleFighter:
             self._avatar_clf = GenshinDetector(res.model("avatar_side_classify_sim.onnx"))
         return self._avatar_clf
 
-    # ── 敌人检测 ──
+    # ── 世界敌人检测（bgi_world，含发呆怪）──
+
+    def _world_detector(self) -> GenshinDetector:
+        if self._world_det is None:
+            self._world_det = GenshinDetector(res.model("bgi_world.onnx"), conf=0.3, iou=0.45)
+        return self._world_det
+
+    def find_enemies(self, *, conf: float | None = None) -> list[Detection]:
+        """世界敌人识别（bgi_world ``"enemy identify"``）→ [Detection, ...]。
+
+        与血条检测的区别：血条只在战斗态显示；``enemy identify`` 识别世界上的怪本体，
+        发呆的怪也检得出（巡逻扫描用这个）。类名带空格，勿写成 ``"enemy_identify"``。
+        """
+        frame = self.ctx.capture()
+        if frame is None:
+            return []
+        dets = self._world_detector().detect(frame, conf=conf)
+        return dets.get("enemy identify", [])
+
+    def has_enemy_in_world(self, *, conf: float | None = None) -> bool:
+        """屏幕上是否有世界敌人（含发呆态）。"""
+        return bool(self.find_enemies(conf=conf))
+
+    # ── 敌人检测（战斗态，血条）──
 
     def has_enemy(self) -> bool:
         """即时截图 + 血条色块检测。"""
@@ -167,7 +200,8 @@ class SimpleFighter:
     def _rotate_camera(self, px: int) -> None:
         """水平转视角（moveBy），异常吞掉。"""
         try:
-            self.ctx.ic.moveBy(int(px), 0)
+            # 旋转用相对移动（avc moveBy 绝对坐标，原神 raw-input 视角不认）
+            self.ctx.move_by_rel(int(px), 0)
         except Exception:
             pass
         utils.sleep(0.1)
@@ -200,9 +234,11 @@ class SimpleFighter:
         return base or None
 
     def _active_slot_index(self) -> int | None:
-        """AvatarIndexRectList 4 个编号块里第一个“非白”= 出战槽；全白返回 None。
+        """4 个编号块里“药丸最弱”的那个 = 出战槽；无法判定返回 None。
 
-        avc：``toGray`` → 各 ROI ``countInRange``(灰度∈[lo,hi] 占比)。
+        实机标定：出战槽药丸明显更弱 —— overworld w+b 0.26~0.37（其余 0.43+），
+        combat 0.0~0.03（其余 0.38+）。取 argmin + 最小间隙校验，两种场景通用。
+        avc：``toGray`` → 各 ROI ``countInRange``(灰度∈[lo,hi] 占比，[0,1])。
         """
         frame = self.ctx.capture()
         if frame is None:
@@ -210,12 +246,76 @@ class SimpleFighter:
         gray = frame.toGray()
         if gray is None:
             return None
-        lo, hi = _INDEX_WHITE_GRAY
-        for i, roi in enumerate(_AVATAR_INDEX_ROIS):
-            # 白块占比（BGI CountGrayMatColor(251,255)）；countInRange 返回 [0,1]
-            if gray.countInRange(roi, lo, hi) < _INDEX_WHITE_RATIO:
-                return i
-        return None
+        pills = [
+            gray.countInRange(roi, *_INDEX_WHITE_GRAY)
+            + gray.countInRange(roi, *_INDEX_BLACK_GRAY)
+            for roi in _AVATAR_INDEX_ROIS
+        ]
+        order = sorted(range(len(pills)), key=lambda i: pills[i])
+        lo, second = pills[order[0]], pills[order[1]]
+        if second - lo >= _INDEX_ACTIVE_GAP:
+            return order[0]
+        return None  # 两个槽药丸强度相近（编队未满/切换中/界面不符）→ 无法判定
+
+    # ── 生存检查（rotation 每步前调用）──
+
+    def _check_survival(self) -> None:
+        """战斗中生存检查：红血→吃药/换人，死亡→按 Z 复活。
+
+        读取 shared.low_hp（auto_eat 守护 150ms 写入）+ 直接像素检查兜底。
+        守护在后台按 Z，fighter 在工作线程也按 Z——双保险（Z 双按无害，
+        便携营养袋有自身 CD）。无药时换人保命（轮询下一槽位）。
+
+        ⚠ 全程 try/except：生存检查不应中断战斗流程（检测失败=不处理，继续打）。
+        """
+        try:
+            self._check_survival_inner()
+        except Exception:
+            pass  # 检测失败不中断战斗
+
+    def _check_survival_inner(self) -> None:
+        from avc._core import KeyCode
+
+        from abilities.game_state import (
+            has_recovery_icon,
+            has_resurrection_icon,
+            is_low_hp,
+        )
+
+        # 0. 死亡检测（最高优先）
+        frame = self.ctx.capture()
+        if frame is not None and has_resurrection_icon(self.ctx, frame):
+            self._tap(KeyCode.z, 0.05)
+            utils.sleep(1.0)
+            return
+
+        # 1. 红血检测：读共享状态 + 直接像素兜底
+        low = False
+        if self.g.runtime is not None:
+            low = self.g.runtime.shared.low_hp
+        if not low and frame is not None:
+            low = is_low_hp(self.ctx, frame)
+        if not low:
+            return
+
+        # 2. 红血 + Recovery 可用 → 按 Z 吃药
+        if frame is not None and has_recovery_icon(self.ctx, frame):
+            self._tap(KeyCode.z, 0.05)
+            utils.sleep(0.3)
+            return
+
+        # 3. 无药 → 换人保命（轮询下一槽位，3 秒冷却）
+        now = time.monotonic()
+        if now - self._last_hp_switch_time < _LOW_HP_SWITCH_COOLDOWN:
+            return
+        active = self._active_slot_index()
+        if active is None:
+            return
+        for slot in range(1, 5):
+            if slot - 1 != active:
+                self.switch_character(slot)
+                self._last_hp_switch_time = now
+                return
 
     # ── 切人 ──
 
@@ -247,6 +347,7 @@ class SimpleFighter:
                 for step in rotation:
                     if time.monotonic() >= deadline:
                         break
+                    self._check_survival()  # 每步前查血量/死亡
                     self._exec_step(step)
                     if _STEP_DEADLINE_CHECK and not self.has_enemy():
                         break
@@ -286,11 +387,11 @@ class SimpleFighter:
         return not self.has_enemy()
 
     def recover_on_death(self) -> bool:
-        """检测死亡/复活弹窗；死亡→传送到七天神像复活→抛 ``Retry``。返回 False=无需处理。
+        """检测死亡/复活弹窗；死亡→传送到最近七天神像复活→抛 ``Retry``。返回 False=无需处理。
 
         对齐 BGI ``Avatar.ThrowWhenDefeated`` → ``TpForRecover``：不点复活按钮，
-        直接传七天神像（传送即复活）。战斗循环每轮开头调。⚠ 传送点名为骨架值
-        （"七天神像-风"），实机按所在国换最近神像。
+        直接传七天神像（传送即复活）。战斗循环每轮开头调。优先按当前位置找最近神像，
+        位置不可用时回退"七天神像-风"。
         """
         from abilities.game_state import has_resurrection_icon
         from framework.errors import Retry
@@ -299,10 +400,31 @@ class SimpleFighter:
         if frame is None or not has_resurrection_icon(self.ctx, frame):
             return False
         try:
-            self.g.teleport_to("七天神像-风")
+            target = self._find_nearest_goddess()
+            self.g.teleport_to(target if target is not None else "七天神像-风")
         except Exception:
             pass  # 传送失败也重试（可能已在神像旁）
         raise Retry(reason="角色死亡，传送七天神像复活后重试")
+
+    def _find_nearest_goddess(self) -> str | None:
+        """按当前位置找最近的七天神像传送点名称；位置不可用返回 None。"""
+        from abilities.navigation.position import PositionGetter
+        from abilities.navigation.tp import TpDatabase
+
+        try:
+            pg = PositionGetter(self.ctx)
+            pos = pg.get_position()
+        except Exception:
+            return None
+        if pos is None:
+            return None
+        db = TpDatabase()
+        goddesses = db.find_by_type("Goddess")
+        if not goddesses:
+            return None
+        x, y = pos
+        goddesses.sort(key=lambda p: math.hypot(p.x - x, p.y - y))
+        return goddesses[0].name
 
     def fight_until_clear(
         self, timeout: float = 120, clear_stable_s: float = 1.5

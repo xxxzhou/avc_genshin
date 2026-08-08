@@ -288,12 +288,12 @@ class TestCameraControl:
         assert angle == 0
 
     def test_target_orientation_north(self):
-        """朝北（负 Y 方向）为 270 度。"""
+        """真罗盘：朝北（+北轴）为 0 度（2026-08-08 改罗盘帧，0=北/90=东）。"""
         from abilities.navigation.camera import CameraControl
 
-        angle = CameraControl.target_orientation((0, 0), (0, -10))
-        # atan2(-10, 0) = -90°, 转正后 270°
-        assert 269 <= angle <= 271
+        angle = CameraControl.target_orientation((0, 0), (10, 0))
+        # atan2(0, 10) = 0° → 北
+        assert 0 <= angle <= 2
 
     def test_target_orientation_same_point(self):
         """相同点返回 0。"""
@@ -303,12 +303,12 @@ class TestCameraControl:
         assert angle == 0
 
     def test_target_orientation_northeast(self):
-        """朝东北方向。"""
+        """真罗盘：朝东北（+北、+东）为 45 度。坐标 (北,西)：东=-西。"""
         from abilities.navigation.camera import CameraControl
 
         angle = CameraControl.target_orientation((0, 0), (10, -10))
-        # atan2(-10, 10) ≈ -45°, 转正后 315°
-        assert 314 <= angle <= 316
+        # dx=10(北), dy=-10(西)=+10(东) → atan2(10,10)=45°
+        assert 44 <= angle <= 46
 
     def test_distance(self):
         """欧氏距离。"""
@@ -636,14 +636,15 @@ class TestCameraImport:
             MINIMAP_Y,
         )
 
-        # 对照 BGI MapAssets.MimiMapRect1080P = Rect(62, 19, 212, 212)
-        assert MINIMAP_X == 62
-        assert MINIMAP_Y == 19
-        assert MINIMAP_W == 212
-        assert MINIMAP_H == 212
-        assert MINIMAP_SIZE == 212
-        assert MINIMAP_CENTER_X == 168
-        assert MINIMAP_CENTER_Y == 125
+        # 实机标定(2026-08-08)：BGI Rect(62,19,212,212) 中心 (168,125) 在本版本偏上 ~29px，
+        # 径向剖面实测环心 (169,154) r≈108 → Rect(61,46,216,216)。见 camera.py 同注释。
+        assert MINIMAP_X == 61
+        assert MINIMAP_Y == 46
+        assert MINIMAP_W == 216
+        assert MINIMAP_H == 216
+        assert MINIMAP_SIZE == 216
+        assert MINIMAP_CENTER_X == 169
+        assert MINIMAP_CENTER_Y == 154
 
 
 # ── PathExecutor action 派发 ──

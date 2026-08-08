@@ -113,7 +113,8 @@ class TrapEscaper:
         direction = random.choice([-1, 1])
         move_x = int(direction * angle * 2)  # 简化旋转
         try:
-            self.ctx.ic.moveBy(move_x, 0)
+            # 旋转用相对移动（avc moveBy 绝对坐标，原神 raw-input 视角不认）
+            self.ctx.move_by_rel(move_x, 0)
         except Exception:
             pass
         time.sleep(0.1)  # 测试时缩短等待

@@ -221,6 +221,9 @@ class TestVerify:
             def set_prev_position(self, x, y):
                 pass
 
+            def get_position_from_big_map(self):
+                return (100.0, 200.0)
+
         class MockCam:
             def get_orientation(self):
                 return 90.0

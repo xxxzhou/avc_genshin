@@ -126,17 +126,39 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
     # ── 7. 定位 ──
     def _position():
         from abilities.navigation.position import PositionGetter
+        from framework.scene import Scene
+        from avc._core import KeyCode
         pg = PositionGetter(ctx)
-        # 全局匹配（无 prev_position）
+        # 全局匹配（无 prev_position；冷启动，地形自相似区域可能歧义）
         global_pos = pg.get_position()
-        # 局部匹配（用传送锚点坐标做 prev_position）
-        from abilities.navigation.tp import TpDatabase
-        anchor = TpDatabase().find_by_name(waypoint)
-        if anchor is not None:
-            pg.set_prev_position(anchor.tran_x, anchor.tran_y)
-            local_pos = pg.get_position()
-            return f"global={global_pos}, local(prev={waypoint})={local_pos}"
-        return f"global={global_pos}, no anchor for local"
+        # SIFT 实测真值：确保大地图打开（以玩家为中心）→ SIFT → 关图回世界
+        ctx.sc.activateWindow("原神")
+        time.sleep(0.3)
+        if g.scene is None or g.scene.scene is not Scene.MAP:
+            ctx.ic.press(KeyCode.m)
+            time.sleep(1.5)
+            for _ in range(10):
+                if g.scene and g.scene.scene is Scene.MAP:
+                    break
+                time.sleep(0.3)
+        sift_truth = pg.get_position_from_big_map()
+        ctx.ic.press(KeyCode.m)  # 关图
+        if not g.wait_main_ui(timeout=10.0):
+            time.sleep(1.5)
+        else:
+            time.sleep(0.5)
+        if sift_truth is None:
+            return f"global={global_pos}, sift=None(开图定位失败)"
+        # 局部匹配（以 SIFT 真值为 prev_position，验证小地图局部锚定精度）
+        pg.set_prev_position(*sift_truth)
+        local_pos = pg.get_position()
+        if local_pos is None:
+            return f"global={global_pos}, sift={tuple(round(v, 1) for v in sift_truth)}, local=None"
+        dx = round(local_pos[0] - sift_truth[0], 1)
+        dy = round(local_pos[1] - sift_truth[1], 1)
+        dist = round((dx * dx + dy * dy) ** 0.5)
+        return (f"global={global_pos}, sift={tuple(round(v, 1) for v in sift_truth)}, "
+                f"local={tuple(round(v, 1) for v in local_pos)} dist={dist}")
     probe("position", _position)
 
     # ── 8. 朝向 ──

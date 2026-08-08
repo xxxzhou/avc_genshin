@@ -24,6 +24,7 @@ class SharedState:
     frame: "IImageBuffer | None" = None
     detections: dict[str, Any] = field(default_factory=dict)  # FrameDaemon 每次整体替换
     player_pos: tuple[float, float] | None = None
+    low_hp: bool = False  # 当前角色红血（auto_eat 守护写入，fighter 读取）
 
     # ── 世界模型（跨任务持久状态，06）──
     _flags: dict[str, Any] = field(default_factory=dict)

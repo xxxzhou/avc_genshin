@@ -61,7 +61,11 @@ _DISPLAY_TP_ZOOM = 4.4  # 传送点图标显示所需 zoom（BGI DisplayTpPointZ
 _TP_ICON_THRESHOLD = 0.65  # 传送点图标匹配阈值（BGI NearbyMapIconTemplateThreshold）
 _MAP_CENTER_X = 960
 _MAP_CENTER_Y = 540
-_MAP_DRAG_START = (960, 540)  # 拖拽起点（视口中心，避开左上 UI 覆盖区 360×400）
+# 拖拽起点。⚠ 2026-08-08 实机探针定位：**不能用视口中心 (960,540)**——
+# 地图打开时玩家位置标记就在中心，Genshin 拦截从玩家标记上发起的拖拽
+#（calib_drag Δ=0 / 手动拖中心 0.3% vs 非中心 49-64% 像素差）。改到中心下方
+# (960,650)，四方向实测 SIFT 跟踪 ±200-240 单位。避开左上 UI 覆盖区 360×400。
+_MAP_DRAG_START = (960, 650)
 _COUNTRY_BTN_POS = (1760, 1020)  # 右下"当前区域"按钮（BGI Width-160, Height-60）
 _COUNTRY_OCR_ROI = (1280, 0, 640, 1080)  # 国家列表 OCR 区（右 1/3，BGI Width*2/3）
 _SWITCH_AREA_RETRIES = 4  # 国家列表 OCR 重试次数（BGI SwitchAreaCandidateRetryCount）
