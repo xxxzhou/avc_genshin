@@ -51,15 +51,24 @@ class TestMap256Coordinate:
         # 游戏原点 (0,0) → 256 地图 (4096, 2048)
         px, py = pg._game_to_map256(0, 0)
         assert abs(px - MAP256_ORIGIN_X) < 0.01 and abs(py - MAP256_ORIGIN_Y) < 0.01
-        # 游戏 (1000, 0) → x 减少 1000*0.25=250
-        px2, _ = pg._game_to_map256(1000.0, 0.0)
-        assert abs(px2 - (MAP256_ORIGIN_X - 250.0)) < 0.01
+        # 2026-08-08 坐标轴对换（对照 BGI TeyvatMapCoordinate.GameToMain）：
+        # _game_to_map256(gx=position[0]北, gy=position[2]西) → px=西轴, py=北轴
+        # 北向 gx=1000 → py 减少 1000*0.25=250（px 不变，西向 gy=0）
+        px2, py2 = pg._game_to_map256(1000.0, 0.0)
+        assert abs(px2 - MAP256_ORIGIN_X) < 0.01
+        assert abs(py2 - (MAP256_ORIGIN_Y - 250.0)) < 0.01
+        # 西向 gy=1000 → px 减少 250（py 不变）
+        px3, py3 = pg._game_to_map256(0.0, 1000.0)
+        assert abs(px3 - (MAP256_ORIGIN_X - 250.0)) < 0.01
+        assert abs(py3 - MAP256_ORIGIN_Y) < 0.01
 
     def test_consistent_with_2048_scale(self):
         # 与既有 2048 静态转换一致：2048px = 8 × 256px
-        gx, gy = 2000.0, -1000.0
-        ix, iy = PositionGetter.game_to_image_coords(gx, gy)  # 2048 缩放
-        px, py = PositionGetter(MagicMock())._game_to_map256(gx, gy)
+        # _game_to_map256 取 (position[0]北, position[2]西) 序；
+        # game_to_image_coords 是 BGI (X西, Y北) 序 → 需换参传入同一游戏位置。
+        north, west = 2000.0, -1000.0
+        px, py = PositionGetter(MagicMock())._game_to_map256(north, west)
+        ix, iy = PositionGetter.game_to_image_coords(west, north)
         assert abs(ix - px * 8) < 0.1 and abs(iy - py * 8) < 0.1
 
 

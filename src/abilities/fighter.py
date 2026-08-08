@@ -238,6 +238,7 @@ class SimpleFighter:
         ``finally`` 释放所有按住的键 + 鼠标（含 ``release_all_keys`` 漏掉的鼠标/num 键）。
         """
         rotation = rotation if rotation is not None else DEFAULT_ROTATION
+        self.ctx.ensure_foreground()  # 战斗全程 ic 直调，开头保证前台
         deadline = time.monotonic() + duration_s
         try:
             while time.monotonic() < deadline:

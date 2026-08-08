@@ -5,9 +5,8 @@
 
 所有方法假设调用时已处于 ``Scene.MAP``（由调用方保证）。坐标均为 1080p buffer 坐标。
 
-⚠ 多个方向/系数源自 BGI TpConfig/TpTask，因 avc 输入语义（moveBy/scroll 的 DPI、
-正负方向）与 SendInput 不完全等同，下列符号常量需经 ``verify`` 实机标定回填：
-``_ZOOM_WHEEL_SIGN`` / ``_DRAG_X_SIGN`` / ``_DRAG_Y_SIGN`` / ``_DRAG_DPI_MULT``。
+已 2026-08-08 实机标定（verify do_map_calib）：滚轮方向/每槽步长、拖拽方向/scale_factor。
+保留常量的 BGI 来源注释；差异点（avc 语义）已就地标注。
 """
 
 from __future__ import annotations
@@ -34,20 +33,27 @@ _ZOOM_END_Y = 612  # 旋钮底部 Y（地图最大放大，scale=0, zoom=6）BGI
 _ZOOM_BTN_ROI = (30, 440, 40, 200)  # 旋钮搜索区（BGI MapScaleButton ROI）
 
 # 滚轮缩放（BGI AdjustMapZoomLevel）
-_ZOOM_PER_NOTCH = 0.085  # 每滚轮槽 zoom 步长（BGI DefaultMapZoomLevelPerWheelNotch）
+# avc scroll(0, dy) 中 dy 是滚轮槽数（C++ 内部 dy*WHEEL_DELTA），不是 WHEEL_DELTA 单位。
+# ⚠ 大槽数单次无效：实机 scroll(0,±3)×3 → zoom delta=0（游戏把一次大滚动吞掉）；
+# 必须逐槽发送（set_zoom_level 已逐槽 for 循环）。
+_ZOOM_PER_NOTCH = 0.083  # 每滚轮槽 zoom 步长（2026-08-08 实机标定：scroll(0,+1)×5 → delta=-0.417）
 _ZOOM_WHEEL_SIGN = -1  # scroll dy 与 zoom 增减关系（实机确认：+dy 缩小→zoom 减→sign=-1）
 _MAX_ZOOM_NOTCHES = 16  # 单次缩放最大滚轮槽（BGI MaxMapZoomWheelBatchNotches）
 _MAX_ZOOM_ATTEMPTS = 3  # 缩放重试轮数
 _ZOOM_TOLERANCE = 0.3  # zoom 达标容差
 
 # 拖拽平移（BGI GetMoveMapState / MouseMoveMap）
-_MAP_SCALE_FACTOR = 2.361  # 游戏单位→像素（zoom=1）BGI MapScaleFactor
+# ⚠ 2026-08-08 实机标定：SIFT 轴修复后重测（verify do_map_calib）：
+# drag(+200)@zoom3.85 → 视口西轴移动 168 单位（84%），scale 偏低。
+# 校准：_MAP_SCALE_FACTOR = 3.0 * (200/168) ≈ 3.57（buf_to_scr = sc.width()/1920 = 1293/1920 = 0.673）。
+# 数学：total(物理px) = S*U/z*buf_to_scr；实测 px/unit@z ≈ 2.4/z → S ≈ 2.4/buf_to_scr ≈ 3.57。
+_MAP_SCALE_FACTOR = 3.57  # 游戏单位→屏幕像素（zoom=1）；avc moveTo 语义，已含 dpi 补偿
 _MAP_DRAG_PIXELS_PER_STEP = 48  # 每步最大像素（BGI MapDragPixelsPerStep）
 _MAP_DRAG_FAST_STEP_RATIO = 0.42  # 快速段步数占比（BGI MapDragFastStepRatio）
 _MAP_DRAG_FAST_DISTANCE_RATIO = 0.85  # 快速段距离占比（BGI MapDragFastDistanceRatio）
 _MAP_DRAG_STEP_MS = 20  # 每步间隔（ms）
-_DRAG_X_SIGN = 1  # 拖拽 X 方向符号（实机确认：+x拖→SIFT x增大→同向→1）
-_DRAG_Y_SIGN = 1  # 拖拽 Y 方向符号（实机确认：+y拖→SIFT y增大→同向→1）
+_DRAG_X_SIGN = 1  # 屏幕水平符号（西向增量→拖右：+西→+x→1）
+_DRAG_Y_SIGN = 1  # 屏幕垂直符号（北向增量→拖下：+北→+y→1）
 _DRAG_DPI_MULT = 0.0  # 已弃用：moveTo 绝对坐标模式下不需要 DPI 乘子（buf_to_scr 由 sc.width/1920 计算）
 
 # 图标 / 区域
@@ -143,8 +149,11 @@ class MapController:
             notches = min(
                 _MAX_ZOOM_NOTCHES, max(1, int(round(abs(diff) / _ZOOM_PER_NOTCH)))
             )
-            dy = _ZOOM_WHEEL_SIGN * (1 if diff > 0 else -1) * notches
-            self.ctx.ic.scroll(0, dy)
+            # 逐槽发送（avc scroll(0,N) 一次发 N×WHEEL_DELTA，大 N 时游戏截断）
+            dy_sign = _ZOOM_WHEEL_SIGN * (1 if diff > 0 else -1)
+            for _ in range(notches):
+                self.ctx.ic.scroll(0, dy_sign)
+                utils.sleep(0.05)
             utils.sleep(0.15)
             frame = self.ctx.capture()
             cur = self.measure_zoom_level(frame)
@@ -154,8 +163,19 @@ class MapController:
 
     # ── 拖拽 ──
 
-    def drag_map(self, dx_game: float, dy_game: float, zoom_level: float) -> None:
-        """拖拽地图：把视口中心朝 (dx_game, dy_game) 游戏偏移方向移动。
+    def drag_map(self, north_delta: float, west_delta: float, zoom_level: float) -> None:
+        """拖拽地图：把视口中心沿游戏坐标移动 (north_delta, west_delta)。
+
+        坐标约定与 tp.py TpPosition 一致（x=position[0]=北轴, y=position[2]=西轴）：
+        - north_delta: 北向增量（+北 / -南）
+        - west_delta:  西向增量（+西 / -东）
+
+        屏幕映射（地图拖动物理：地图往下拖 → 看到北方；往右拖 → 看到西方）：
+        - 屏幕水平偏移 ← +west_delta（往西 → 往右拖）
+        - 屏幕垂直偏移 ← +north_delta（往北 → 往下拖）
+        ⚠ 2026-08-08 实机确认（calib_drag）：原实现 (dx=北, dy=西) 错位成
+        屏幕X←dx、屏幕Y←dy，导致拖拽方向偏 90°（视口漂到海洋/未开放区）。
+        已改为上述正确映射。
 
         对照 BGI GetMoveMapState + MouseMoveMap：
         mouse_px = MapScaleFactor * |game_dist| / zoom_level，方向 sign(offset)；
@@ -165,14 +185,15 @@ class MapController:
         改用 moveTo 绝对坐标：每步算出目标屏幕坐标，moveTo 移过去。
         moveTo 用逻辑屏幕像素，buffer→screen 缩放比 = screen_w/buf_w。
         """
+        self.ctx.ensure_foreground()  # 拖拽全程 ic 直调，开头保证前台
         zoom_level = zoom_level if zoom_level > 0 else 1.0
-        total_x = _MAP_SCALE_FACTOR * abs(dx_game) / zoom_level
-        total_y = _MAP_SCALE_FACTOR * abs(dy_game) / zoom_level
+        total_x = _MAP_SCALE_FACTOR * abs(west_delta) / zoom_level  # 西向偏移 → 屏幕水平
+        total_y = _MAP_SCALE_FACTOR * abs(north_delta) / zoom_level  # 北向偏移 → 屏幕垂直
         dist = math.hypot(total_x, total_y)
         if dist < 1.0:
             return
-        sign_x = _DRAG_X_SIGN * (1 if dx_game >= 0 else -1)
-        sign_y = _DRAG_Y_SIGN * (1 if dy_game >= 0 else -1)
+        sign_x = _DRAG_X_SIGN * (1 if west_delta >= 0 else -1)  # 往西 → 往右拖（+x）
+        sign_y = _DRAG_Y_SIGN * (1 if north_delta >= 0 else -1)  # 往北 → 往下拖（+y）
 
         steps = max(5, min(60, int(math.ceil(dist / _MAP_DRAG_PIXELS_PER_STEP))))
         ic = self.ctx.ic
@@ -269,27 +290,31 @@ class MapController:
 
     # ── 传送点图标 ──
 
-    def find_tp_icon(self, target_type: str, frame=None) -> "Rect | None":
-        """按 target.type 匹配传送点图标，返回最接近视口中心的命中。
+    def find_tp_icons(self, target_type: str, frame=None) -> "list[Rect]":
+        """按 target.type 匹配所有传送点图标，按距视口中心距离升序返回。
 
-        对照 BGI ClickTeleportTargetMapPoint（简化：取最近型匹配图标，
+        返回候选列表（而非单个）供传送链逐个点击：玩家地图可能有自定义标记
+        覆盖部分图标，点击命中标记 pin 时需换下一个候选重试（见 tp.py 传送确认）。
+
+        对照 BGI ClickTeleportTargetMapPoint（简化：候选按最近排序，
         不做 BGI 匈牙利算法相对模式 —— 留 v2）。
         """
         paths = self._icon_paths_for(target_type)
         if not paths:
-            return None
+            return []
         found = vu.find_all_templates(
             self.ctx, paths, threshold=_TP_ICON_THRESHOLD, frame=frame
         )
-        best = None
-        best_d = float("inf")
+        icons: "list[Rect]" = []
         for rects in found.values():
-            for r in rects:
-                d = math.hypot(r.cx - _MAP_CENTER_X, r.cy - _MAP_CENTER_Y)
-                if d < best_d:
-                    best_d = d
-                    best = r
-        return best
+            icons.extend(rects)
+        icons.sort(key=lambda r: math.hypot(r.cx - _MAP_CENTER_X, r.cy - _MAP_CENTER_Y))
+        return icons
+
+    def find_tp_icon(self, target_type: str, frame=None) -> "Rect | None":
+        """按 target.type 匹配传送点图标，返回最接近视口中心的命中（首个候选）。"""
+        icons = self.find_tp_icons(target_type, frame=frame)
+        return icons[0] if icons else None
 
     @staticmethod
     def _icon_paths_for(target_type: str) -> list[str]:

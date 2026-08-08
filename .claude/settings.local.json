@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 120 bash -c 'PYTHONPATH=\"\"\"\"D:/Work/github/avc_genshin/src\"\"\"\" python \"\"\"\"C:/Users/ADMINI~1/AppData/Local/Temp/claude/exp_panel.py\"\"\"\" 2>&1')",
+      "Bash(timeout 90 bash -c 'PYTHONPATH=\"\"\"\"D:/Work/github/avc_genshin/src\"\"\"\" python \"\"\"\"C:/Users/ADMINI~1/AppData/Local/Temp/claude/test_fkey.py\"\"\"\" 2>&1')",
+      "Bash(timeout 90 bash -c 'PYTHONPATH=\"\"\"\"D:/Work/github/avc_genshin/src\"\"\"\" python \"\"\"\"C:/Users/ADMINI~1/AppData/Local/Temp/claude/test_panel_seq.py\"\"\"\" 2>&1')",
+      "Bash(timeout 60 bash -c 'PYTHONPATH=\"\"\"\"D:/Work/github/avc_genshin/src\"\"\"\" python \"\"\"\"C:/Users/ADMINI~1/AppData/Local/Temp/claude/test_waypoint.py\"\"\"\" 2>&1')",
+      "Bash(grep -iA1 \"permission\\\\|bypass\\\\|accept\\\\|allow\\\\|mode\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''defaultMode='''',d.get\\(''''defaultMode''''\\)\\); print\\(''''permissions='''',d.get\\(''''permissions''''\\)\\); print\\(''''projects='''',list\\(d.get\\(''''projects'''',{}\\).keys\\(\\)\\)[:5]\\)\")",
+      "Bash(echo CLAUDE_CODE_PERMISSION_MODE=$CLAUDE_CODE_PERMISSION_MODE)",
+      "Bash(echo CLAUDE_CODE_FORCE_PLAN_MODE=$CLAUDE_CODE_FORCE_PLAN_MODE)",
+      "Bash(python:*)"
+    ]
+  }
+}

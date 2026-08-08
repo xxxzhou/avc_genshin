@@ -67,6 +67,9 @@ class MockContext:
     def release_all_keys(self):
         pass
 
+    def ensure_foreground(self, wait_s=0.0):
+        return True
+
 
 # ── 血条检测（纯 CV）──
 

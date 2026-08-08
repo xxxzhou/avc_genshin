@@ -141,6 +141,7 @@ class HighLevelApi:
         self.ctx.ic.moveTo(int(x), int(y))
 
     def scroll(self, dx: int, dy: int) -> None:
+        """滚轮滚动。dx/dy 为滚轮格数（1=1格，avc 内部 ×WHEEL_DELTA 发送）。"""
         self._call(self._scroll(dx, dy))
 
     async def _scroll(self, dx, dy):
@@ -243,10 +244,11 @@ class HighLevelApi:
         """
         from abilities.navigation.tp import Teleporter
 
+        # ⚠ 直接在工作线程执行领域函数（而非包 _coro 提交到 loop）：teleport_to 内部
+        # 会调 g.*（wait_scene/wait_main_ui/click），若在 loop 线程同步阻塞执行，
+        # 内部 g.* 桥提交到同一 loop 被卡住 → 死锁（TimeoutError）。工作线程直调 +
+        # 内部 g.* 桥正常回 loop（loop 空闲），与 verify do_map_calib 同模式。
         teleporter = Teleporter(self.ctx, self)
-        return self._call(self._teleport_coro(teleporter, name_or_pos, map_name))
-
-    async def _teleport_coro(self, teleporter, name_or_pos, map_name):
         result = teleporter.teleport_to(name_or_pos, map_name)
         self._observe("action", action="teleport_to", target=str(name_or_pos))
         return result
@@ -268,9 +270,6 @@ class HighLevelApi:
         if isinstance(pos, tuple):
             pos = Waypoint(x=pos[0], y=pos[1])
         nav = Navigator(self.ctx, self)
-        return self._call(self._go_to_coro(nav, pos, tolerance, timeout), timeout=timeout + 10)
-
-    async def _go_to_coro(self, nav, pos, tolerance, timeout):
         result = nav.go_to(pos, tolerance=tolerance, timeout=timeout)
         self._observe("action", action="go_to", target=f"({pos.x:.1f},{pos.y:.1f})")
         return result
@@ -279,9 +278,7 @@ class HighLevelApi:
         """选择对话选项（模糊文本匹配，Phase A 实现）。"""
         from abilities.dialog import talk as _talk
 
-        self._call(self._talk_coro(option))
-
-    async def _talk_coro(self, option):
+        self._token.check() if self._token is not None else None
         _talk(self.ctx, option)
         self._observe("action", action="talk", option=option)
 
@@ -289,11 +286,10 @@ class HighLevelApi:
         """跳过对话直到离开 DIALOG 场景（Phase A 实现）。"""
         from abilities.dialog import talk_skip as _skip
 
-        return self._call(self._skip_coro(timeout), timeout=timeout + 5)
-
-    async def _skip_coro(self, timeout):
-        _skip(self.ctx, timeout)
+        self._token.check() if self._token is not None else None
+        ok = _skip(self.ctx, timeout)
         self._observe("action", action="talk_skip")
+        return ok
 
     # ── 战斗（领域能力，Phase C）──
 
@@ -324,9 +320,7 @@ class HighLevelApi:
         from abilities.fighter import SimpleFighter
 
         fighter = SimpleFighter(self.ctx, self)
-        self._call(self._fight_coro(fighter, duration_s, rotation), timeout=duration_s + 15)
-
-    async def _fight_coro(self, fighter, duration_s, rotation):
+        self._token.check() if self._token is not None else None
         fighter.fight(duration_s, rotation)
         self._observe("action", action="fight", duration=duration_s)
 
@@ -335,11 +329,7 @@ class HighLevelApi:
         from abilities.fighter import SimpleFighter
 
         fighter = SimpleFighter(self.ctx, self)
-        return self._call(
-            self._fight_until_clear_coro(fighter, timeout), timeout=timeout + 30
-        )
-
-    async def _fight_until_clear_coro(self, fighter, timeout):
+        self._token.check() if self._token is not None else None
         result = fighter.fight_until_clear(timeout=timeout)
         self._observe("action", action="fight_until_clear", cleared=result)
         return result

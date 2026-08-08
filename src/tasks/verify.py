@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import sys
 import time
 
 from framework import task
+from framework.status import StatusLine
 
 
 @task(
@@ -48,14 +50,18 @@ from framework import task
 def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, do_ocr: bool = True, do_map_calib: bool = False) -> dict:
     """逐项探测并打印。返回 ``{"results": {探测名: 结果串}}``。"""
     results: dict[str, str] = {}
+    status = StatusLine()
 
     def probe(name: str, fn) -> None:
         """跑一个探测：异常也记录（ERR ...），不中断整体。"""
+        status.show(f"[verify] {name} ...")
         try:
             v = fn()
             results[name] = f"OK  {v!r}"
         except Exception as e:  # noqa: BLE001 — 诊断任务要吞掉所有异常逐个报告
             results[name] = f"ERR {type(e).__name__}: {e}"
+        tag = "OK" if results[name].startswith("OK") else "ERR"
+        status.show(f"[verify] {name}: {tag}")
 
     # ── 1. 截图基础 ──
     probe("capture", lambda: _capture_info(ctx))
@@ -108,6 +114,12 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         return f"{waypoint!r} → {p.name if p else '未找到（名字不在 tp.json / 非 Teyvat）'}"
     probe("tp_lookup", _tp_lookup)
     if do_teleport:
+        # 传送涉及鼠标/键盘操作，先确保原神窗口在前台（终端/浏览器在前台则操作落空）
+        try:
+            ctx.sc.activateWindow("原神")
+        except Exception:
+            pass
+        time.sleep(0.3)
         probe("teleport_to", lambda: g.teleport_to(waypoint))
         probe("after_tp_wait_main_ui", lambda: g.wait_main_ui(timeout=30))
 
@@ -223,10 +235,10 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
 
             mc = MapController(ctx, g)
             z0 = mc.measure_zoom_level()
-            # 测试多种 scroll 值：1（小）、120（WHEEL_DELTA）、-120
+            # avc scroll(0, dy) 的 dy 是滚轮格数（内部 dy*WHEEL_DELTA），不是 WHEEL_DELTA 单位
+            # 测试：1格×5次、3格×3次、-3格×3次
             parts = [f"zoom0={z0}"]
-            for label, dy in [("dy=+1×5", 1), ("dy=+120×3", 120), ("dy=-120×3", -120)]:
-                count = 5 if dy == 1 else 3
+            for label, dy, count in [("dy=+1×5", 1, 5), ("dy=+3×3", 3, 3), ("dy=-3×3", -3, 3)]:
                 for _ in range(count):
                     ctx.ic.scroll(0, dy)
                     time.sleep(0.15)
@@ -237,13 +249,31 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             return "; ".join(parts)
         probe("calib_scroll_zoom", _require_map(_scroll_zoom))
 
-        # 12d. 拖拽方向/DPI —— 拖已知向量前后 SIFT 位置差 → 推断 _DRAG_X_SIGN/_DRAG_Y_SIGN/_DRAG_DPI_MULT
+        # 12d. 拖拽方向/DPI —— 拖已知向量前后 SIFT 位置差 → 验证 _DRAG_X_SIGN/_DRAG_Y_SIGN/_MAP_SCALE_FACTOR
+        # ⚠ 约定（2026-08-08 修正）：drag_map(200,0)=北向+200，drag_map(0,200)=西向+200
         def _drag_probe():
             from abilities.navigation.map_ops import MapController
             from abilities.navigation.position import PositionGetter
+            from framework.scene import Scene
+            from avc._core import KeyCode
 
             pg = PositionGetter(ctx)
             mc = MapController(ctx, g)
+
+            # 若视口定位不到（前次失败可能把地图停在海洋/未开放区）→ M 关/开图复位到玩家
+            if pg.get_position_from_big_map() is None:
+                ctx.sc.activateWindow("原神")
+                time.sleep(0.3)
+                ctx.ic.press(KeyCode.m)  # 关图
+                time.sleep(0.6)
+                ctx.ic.press(KeyCode.m)  # 重开（以玩家为中心）
+                time.sleep(1.5)
+                for _ in range(10):
+                    if g.scene and g.scene.scene is Scene.MAP:
+                        break
+                    time.sleep(0.3)
+                time.sleep(0.5)
+
             zoom = mc.measure_zoom_level() or 4.0
             # 先放大地图到 zoom≈4（传送点可见级别），避免拖太远 SIFT 丢失
             mc.set_zoom_level(4.0)
@@ -267,8 +297,8 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             time.sleep(0.3)
             p3 = pg.get_position_from_big_map()
             dy_neg = None if p2 is None or p3 is None else round(p3[1] - p2[1], 1)
-            return (f"drag(+200,0)@zoom{zoom:.2f}: dx={dx}; "
-                    f"drag(0,+200): dy={dy_pos}; drag(0,-200): dy={dy_neg}; "
+            return (f"drag(north+200)@zoom{zoom:.2f}: Δnorth={dx}; "
+                    f"drag(west+200): Δwest={dy_pos}; drag(west-200): Δwest={dy_neg}; "
                     f"pos: {p0}→{p1}→{p2}→{p3}")
         probe("calib_drag", _require_map(_drag_probe))
 
@@ -295,6 +325,8 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
 
             results_parts = [
                 f"to_screen(960,540)=({sx},{sy})",
+                f"sc.size={ctx.sc.width()}x{ctx.sc.height()}",
+                f"border=({ctx._border_left},{ctx._border_top})",
                 f"cursor_after_moveTo={actual_pos}",
                 f"screen_bounds={screen_bounds}",
                 f"dpi={dpi:.2f}",
@@ -383,11 +415,36 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             return f"sift={pos}, nearest={p.name!r}@({p.x},{p.y}) dist={d:.0f}"
         probe("calib_axis_check", _require_map(_axis_check))
 
+        # 12g. zoom 扫描 SIFT 定位 —— 在不同缩放档测定位稳定性（确定"如何确定正确位置"）
+        def _zoom_sift_scan():
+            from abilities.navigation.map_ops import MapController
+            from abilities.navigation.position import PositionGetter
+
+            mc = MapController(ctx, g)
+            pg = PositionGetter(ctx)
+            parts = []
+            for target_z in (2.5, 3.5, 4.4, 5.5):
+                mc.set_zoom_level(target_z)
+                time.sleep(0.3)
+                z = mc.measure_zoom_level()
+                if z is None:
+                    parts.append(f"z{target_z}: zoom 测不到")
+                    continue
+                t0 = time.perf_counter()
+                pos = pg.get_position_from_big_map()
+                dt = time.perf_counter() - t0
+                parts.append(f"z{z:.2f}: pos={pos} ({dt * 1000:.0f}ms)")
+            return "; ".join(parts)
+        probe("calib_zoom_sift", _require_map(_zoom_sift_scan))
+
     # ── 打印 + 返回 ──
-    print("\n===== avc_genshin 实机诊断 =====")
+    ok_count = sum(1 for v in results.values() if v.startswith("OK"))
+    err_count = len(results) - ok_count
+    status.show(f"[verify] 完成: {ok_count} OK / {err_count} ERR / {len(results)} total")
+    # 详细结果写 stderr（不占状态行），供事后查看
     for k, v in results.items():
-        print(f"  {k:24s} {v}")
-    print("==============================")
+        print(f"  {k:24s} {v}", file=sys.stderr)
+    status.finish()
     return {"results": results}
 
 

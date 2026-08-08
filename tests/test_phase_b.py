@@ -31,6 +31,9 @@ class MockContext:
     def click_at(self, x, y, button="left"):
         pass
 
+    def ensure_foreground(self, wait_s=0.0):
+        return True
+
 
 def _make_mock_ctx():
     return MockContext()
@@ -827,13 +830,14 @@ class TestBigMapSiftRelocation:
         return pg
 
     def test_coordinate_chain_full_search(self):
-        """无 expected → matchQueryFull；命中点 (340,335) → _map256_to_game → (15024.0, 6852.0)。"""
+        """无 expected → matchQueryFull；命中点 (340,335) → _map256_to_game → (6852.0, 15024.0)。"""
         fm = MagicMock()
         fm.matchQueryFull.return_value = 1  # 全图兜底，>0 视为命中
         fm.getMatch.return_value = MagicMock(x=340, y=335, w=0, h=0)  # 点结果（w=h=0 哨兵）
         pg = self._pg_with(fm, MagicMock())
-        # (4096-340)/0.25=15024.0, (2048-335)/0.25=6852.0
-        assert pg.get_position_from_big_map(frame=MagicMock()) == (15024.0, 6852.0)
+        # 2026-08-08 轴对换：r.x=西轴(px), r.y=北轴(py)
+        # position[0]北=(2048-335)/0.25=6852.0, position[2]西=(4096-340)/0.25=15024.0
+        assert pg.get_position_from_big_map(frame=MagicMock()) == (6852.0, 15024.0)
         fm.matchQueryFull.assert_called_once()
         fm.matchQueryLocal.assert_not_called()
 
@@ -876,9 +880,12 @@ class TestBigMapSiftRelocation:
         vp.width = 480  # 视口缩 1/4 后（BGI resizedGrey 尺度）
         vp.height = 270
         pg = self._pg_with(fm, vp)
-        # expected_center 给游戏坐标；_build_search_rect 转 256 底图系算 roi
-        result = pg.get_position_from_big_map(frame=MagicMock(), expected_center=(15024.0, 6852.0))
-        assert result == (15024.0, 6852.0)
+        # expected_center 给游戏坐标（position[0]北, position[2]西 序）；
+        # _build_search_rect 转 256 底图系算 roi
+        result = pg.get_position_from_big_map(
+            frame=MagicMock(), expected_center=(6852.0, 15024.0)
+        )
+        assert result == (6852.0, 15024.0)
         fm.matchQueryLocal.assert_called_once()
         fm.matchQueryFull.assert_not_called()
         # matchQueryLocal(viewport, roiX, roiY, roiW, roiH, expandCells)
@@ -938,7 +945,7 @@ class TestMapControllerZoom:
         assert _mc().measure_zoom_level(MagicMock()) is None
 
     def test_set_zoom_level_converges(self, monkeypatch):
-        """滚轮缩放：diff→notches→scroll，进入容差即停（不超额滚）。"""
+        """滚轮缩放：diff→notches→逐槽 scroll，进入容差即停（不超额滚）。"""
         monkeypatch.setattr(
             "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
         )
@@ -947,8 +954,11 @@ class TestMapControllerZoom:
         # 初始 4.0 → diff 1.0(>0.3) 滚一轮；4.9 → diff 0.1(≤0.3) 停
         mc.measure_zoom_level = MagicMock(side_effect=[4.0, 4.9])
         assert mc.set_zoom_level(5.0) == 4.9
-        # notches = round(1.0 / 0.085) = 12；dy = _ZOOM_WHEEL_SIGN(-1) × (+1) × 12 = -12
-        ctx.ic.scroll.assert_called_once_with(0, -12)
+        # notches = round(1.0 / 0.083) = 12；逐槽 dy = _ZOOM_WHEEL_SIGN(-1) × (+1) = -1
+        # 2026-08-08 实机：一次 scroll(0,大N) 被游戏吞掉，必须逐槽发送
+        assert ctx.ic.scroll.call_count == 12
+        for call in ctx.ic.scroll.call_args_list:
+            assert call.args == (0, -1)
 
     def test_set_zoom_level_caps_notches(self, monkeypatch):
         """diff 极大 → notches 封顶 _MAX_ZOOM_NOTCHES(16)，不溢出。"""
@@ -960,7 +970,9 @@ class TestMapControllerZoom:
         # 1.0 → 6.0：diff=5.0，单轮 notches 应封顶 16；6.0 已达容差返回
         mc.measure_zoom_level = MagicMock(side_effect=[1.0, 6.0])
         mc.set_zoom_level(6.0)
-        ctx.ic.scroll.assert_called_once_with(0, -16)
+        assert ctx.ic.scroll.call_count == 16
+        for call in ctx.ic.scroll.call_args_list:
+            assert call.args == (0, -1)
 
     def test_set_zoom_level_none_when_unmeasurable(self, monkeypatch):
         """测不到 zoom → 不滚轮，返回 None。"""
@@ -989,21 +1001,22 @@ class TestMapControllerDrag:
         return ctx
 
     def test_drag_sequence_and_total_distance(self):
-        """拖 1000 game 单位（zoom=1）→ moveTo 绝对坐标，终点 X ≈ 960+2361。"""
+        """拖 1000 北向 game 单位（zoom=1）→ 屏幕 Y 移动，终点 Y ≈ 540+3570。"""
         mc = _mc(self._ctx())
-        mc.drag_map(1000.0, 0.0, 1.0)
+        mc.drag_map(1000.0, 0.0, 1.0)  # north_delta=1000, west_delta=0
         ic = mc.ctx.ic
         # 第一个 moveTo 是起点，后续 moveTo 是每步目标
         moves = ic.moveTo.call_args_list
         assert len(moves) >= 6  # 起点 + 5~60 步
         # 起点
         assert moves[0].args == (960, 540)
-        # 终点 X ≈ 960 + MapScaleFactor(2.361)*1000/1.0 * (1920/1920) = 960+2361 = 3321
-        final_x = moves[-1].args[0]
-        assert abs(final_x - 3321) <= 25
-        # Y 全程 ≈ 540
+        # 2026-08-08 实机标定：北向 → 屏幕 Y 偏移 = MapScaleFactor(3.57)*1000/1.0 = 3570
+        # 3.57 = 3.0*(200/168)（drag(+200)@zoom3.85 实测西轴移 168 单位，scale 偏低校准）
+        final_y = moves[-1].args[1]
+        assert abs(final_y - 4110) <= 25
+        # X 全程 ≈ 960（西向增量 0）
         for m in moves:
-            assert m.args[1] == 540
+            assert m.args[0] == 960
         ic.mouseDown.assert_called_once_with("LB")
         ic.mouseUp.assert_called_once_with("LB")
 
@@ -1179,63 +1192,73 @@ class TestNavigateMapToTarget:
         base.update(kw)
         return TpPosition(**base)
 
-    def test_convergence_drags_then_clicks_icon(self, monkeypatch):
-        """位置递进：远→拖一次→近→退出→点图标。"""
+    def test_convergence_drags_then_returns_candidates(self, monkeypatch):
+        """位置递进：远→拖一次→近→退出→返回候选图标（点击留到确认循环）。"""
         from abilities.navigation.map_ops import DISPLAY_TP_ZOOM
         from abilities.vision_utils import Rect
 
         mc = MagicMock()
         mc.measure_zoom_level.return_value = 4.0
-        mc.find_tp_icon.return_value = Rect(100, 100, 40, 40)  # cx=120, cy=120
+        mc.find_tp_icons.return_value = [Rect(100, 100, 40, 40)]  # cx=120, cy=120
         tp = self._teleporter(monkeypatch, mc)
         # iter1: 中心(1500,0) → dist 500(>200) 拖；iter2: 中心(1850,0) → dist 150(<200) 退
         tp._pg.get_position_from_big_map.side_effect = [(1500.0, 0.0), (1850.0, 0.0)]
 
-        tp._navigate_map_to_target(self._target())
+        candidates = tp._navigate_map_to_target(self._target())
 
         mc.switch_to_ground_layer.assert_called_once()
         mc.switch_country.assert_not_called()  # country=None
         mc.drag_map.assert_called_once_with(500.0, 0.0, 4.0)
         # 收尾放大到 DisplayTpPointZoomLevel
         assert mc.set_zoom_level.call_args.args[0] == DISPLAY_TP_ZOOM
-        mc.find_tp_icon.assert_called_once()
-        tp.g.click.assert_called_once_with(120.0, 120.0)
+        mc.find_tp_icons.assert_called_once()
+        # 不再内部点击，返回候选供 _click_and_confirm_teleport 使用
+        tp.g.click.assert_not_called()
+        assert len(candidates) == 1
+        assert (candidates[0].cx, candidates[0].cy) == (120, 120)
 
     def test_aborts_after_consecutive_locate_failures(self, monkeypatch):
-        """SIFT 连续 3 次失败 → RuntimeError，不拖拽。"""
+        """SIFT 连续失败且复位超限 → RuntimeError，不拖拽。
+
+        2026-08-08 新增 M 关/开图复位：默认 _MAP_RESET_LIMIT=3（每轮 3 次失败复位一次）；
+        置 0 直接走到"首轮失败即中止"，避免 mock 需喂满 12 次 None。
+        """
         mc = MagicMock()
         tp = self._teleporter(monkeypatch, mc)
+        monkeypatch.setattr("abilities.navigation.tp._MAP_RESET_LIMIT", 0)
         tp._pg.get_position_from_big_map.side_effect = [None, None, None]
         with pytest.raises(RuntimeError):
             tp._navigate_map_to_target(self._target())
         mc.drag_map.assert_not_called()
 
-    def test_country_switch_invoked(self, monkeypatch):
-        """target 有 country → switch_country 被调用。"""
+    def test_country_switch_disabled_in_v1(self, monkeypatch):
+        """v1 禁用国家切换（实机确认 (1760,1020) 点不开列表且会误动地图）：
+        target.country 被忽略，走 SIFT 定位 + 拖拽自行跨区收敛。"""
         mc = MagicMock()
         mc.measure_zoom_level.return_value = 4.0
-        mc.find_tp_icon.return_value = None
+        mc.find_tp_icons.return_value = []
         tp = self._teleporter(monkeypatch, mc)
         # 起点已在容差内（与 target (2000,0) 重合 → dist 0 < 200，不拖）
         tp._pg.get_position_from_big_map.side_effect = [(2000.0, 0.0)]
 
         tp._navigate_map_to_target(self._target(country="蒙德"))
 
-        mc.switch_country.assert_called_once()
-        assert mc.switch_country.call_args.args[0] == "蒙德"
+        mc.switch_country.assert_not_called()  # v1 禁用（见 tp.py 注释，留 v2）
         mc.drag_map.assert_not_called()  # 已在容差内，不拖
 
     def test_icon_not_found_falls_back_to_center(self, monkeypatch):
-        """图标未匹配 → 兜底点视口中心 (960,540)。"""
+        """图标未匹配 → 兜底返回视口中心 (960,540)（由确认循环点击）。"""
         mc = MagicMock()
         mc.measure_zoom_level.return_value = 4.0
-        mc.find_tp_icon.return_value = None
+        mc.find_tp_icons.return_value = []
         tp = self._teleporter(monkeypatch, mc)
         tp._pg.get_position_from_big_map.side_effect = [(1990.0, 0.0)]  # 容差内
 
-        tp._navigate_map_to_target(self._target())
+        candidates = tp._navigate_map_to_target(self._target())
 
-        tp.g.click.assert_called_once_with(960, 540)
+        tp.g.click.assert_not_called()
+        assert len(candidates) == 1
+        assert (candidates[0].cx, candidates[0].cy) == (960, 540)
 
     def test_not_in_map_scene_noop(self, monkeypatch):
         """不在 Scene.MAP → 直接返回（不报错、不操作）。"""
@@ -1246,6 +1269,253 @@ class TestNavigateMapToTarget:
         tp.g.scene.scene = Scene.MAIN_UI
         tp._navigate_map_to_target(self._target())
         mc.switch_to_ground_layer.assert_not_called()
+
+
+# ── 传送/标记面板 OCR 检测（tp_panel.py）──
+
+
+class _MockCtx:
+    """最小 GameContext 替身：记录按键，capture 返回 MagicMock。"""
+
+    def __init__(self):
+        self.ic = MagicMock()
+        self._press_log: list = []
+
+    def capture(self):
+        return MagicMock()
+
+    def press(self, key, hold=0.0):
+        self._press_log.append((key, hold))
+
+    def save_debug(self, path):
+        pass
+
+
+class TestTpPanelDetect:
+    """detect_tp_panel：OCR 分类 传送/标记/无。"""
+
+    @staticmethod
+    def _ocr(monkeypatch, texts):
+        monkeypatch.setattr(
+            "abilities.vision_utils.ocr_region",
+            lambda *a, **k: [(t, 0.99) for t in texts],
+        )
+
+    def test_none_when_no_panel_text(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind, detect_tp_panel
+
+        self._ocr(monkeypatch, ["蒙德", "风起地"])
+        assert detect_tp_panel(_MockCtx(), MagicMock()) is TeleportPanelKind.NONE
+
+    def test_teleport_when_has_chuansong(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind, detect_tp_panel
+
+        self._ocr(monkeypatch, ["传送"])
+        assert detect_tp_panel(_MockCtx(), MagicMock()) is TeleportPanelKind.TELEPORT
+
+    def test_marker_when_total_marker_counter(self, monkeypatch):
+        """'总标记113/300' → MARKER（实机最独特的标记面板标识）。"""
+        from abilities.tp_panel import TeleportPanelKind, detect_tp_panel
+
+        self._ocr(monkeypatch, ["总标记113/300", "确认"])
+        assert detect_tp_panel(_MockCtx(), MagicMock()) is TeleportPanelKind.MARKER
+
+    def test_marker_precedence_over_teleport(self, monkeypatch):
+        """标记面板按钮 '追踪'/'删除' 优先于 '传送' 判断（标记面板绝无传送按钮）。"""
+        from abilities.tp_panel import TeleportPanelKind, detect_tp_panel
+
+        self._ocr(monkeypatch, ["追踪", "确认"])
+        assert detect_tp_panel(_MockCtx(), MagicMock()) is TeleportPanelKind.MARKER
+
+    def test_marker_keyword_zhui_zong(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind, detect_tp_panel
+
+        self._ocr(monkeypatch, ["删除"])
+        assert detect_tp_panel(_MockCtx(), MagicMock()) is TeleportPanelKind.MARKER
+
+    def test_find_teleport_button_locates_text(self, monkeypatch):
+        from abilities.vision_utils import Rect
+
+        from abilities.tp_panel import find_teleport_button
+
+        monkeypatch.setattr(
+            "abilities.vision_utils.find_text",
+            lambda *a, **k: Rect(100, 100, 40, 20),  # cx=120, cy=110
+        )
+        btn = find_teleport_button(_MockCtx(), MagicMock())
+        assert btn is not None
+        assert (btn.cx, btn.cy) == (120, 110)
+
+    def test_close_marker_panel_presses_esc_until_closed(self, monkeypatch):
+        from avc._core import KeyCode
+
+        from abilities.tp_panel import TeleportPanelKind, close_marker_panel
+
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.MARKER,  # 一直未关闭 → 按满 max_attempts
+        )
+        ctx = _MockCtx()
+        close_marker_panel(ctx, max_attempts=2)
+        assert len(ctx._press_log) == 2
+        assert all(k == KeyCode.esc for k, _ in ctx._press_log)
+
+    def test_close_marker_panel_skips_when_already_closed(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind, close_marker_panel
+
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.NONE,
+        )
+        ctx = _MockCtx()
+        close_marker_panel(ctx)
+        assert ctx._press_log == []
+
+
+class TestTeleportConfirmFlow:
+    """_wait_and_confirm_teleport / _click_and_confirm_teleport：OCR 面板确认 + 避 pin 换点。"""
+
+    @staticmethod
+    def _tp():
+        from abilities.navigation.tp import Teleporter
+
+        ctx = _MockCtx()
+        g = MagicMock()
+        return Teleporter(ctx, g), ctx, g
+
+    @staticmethod
+    def _rect(cx, cy):
+        from abilities.vision_utils import Rect
+
+        return Rect(int(cx) - 20, int(cy) - 20, 40, 40)
+
+    @staticmethod
+    def _no_sleep(monkeypatch):
+        monkeypatch.setattr("abilities.navigation.tp.utils.sleep", lambda *a, **k: None)
+
+    def test_confirm_teleport_clicks_button(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.TELEPORT,
+        )
+        monkeypatch.setattr(
+            "abilities.tp_panel.find_teleport_button",
+            lambda *a, **k: self._rect(1600, 1000),
+        )
+        assert tp._wait_and_confirm_teleport() is True
+        g.click.assert_called_once_with(1600, 1000)
+
+    def test_confirm_teleport_presses_f_when_button_text_missing(self, monkeypatch):
+        from avc._core import KeyCode
+
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.TELEPORT,
+        )
+        monkeypatch.setattr(
+            "abilities.tp_panel.find_teleport_button", lambda *a, **k: None
+        )
+        assert tp._wait_and_confirm_teleport() is True
+        assert any(k == KeyCode.f for k, _ in ctx._press_log)
+
+    def test_confirm_marker_closes_and_returns_false(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        closed = []
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.MARKER,
+        )
+        monkeypatch.setattr(
+            "abilities.tp_panel.close_marker_panel",
+            lambda *a, **k: closed.append(1),
+        )
+        assert tp._wait_and_confirm_teleport() is False
+        assert len(closed) == 1  # 标记面板已关闭
+        g.click.assert_not_called()  # 不点任何按钮（确认按钮会误改标记）
+
+    def test_confirm_timeout_returns_false(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.NONE,
+        )
+        monkeypatch.setattr("abilities.navigation.tp._CONFIRM_WAIT_TIMEOUT", 0.0)
+        assert tp._wait_and_confirm_teleport() is False
+        g.click.assert_not_called()
+
+    def test_click_and_confirm_retries_next_candidate_on_marker(self, monkeypatch):
+        """避 pin：第一次点击命中标记面板 → 关闭后换下一候选 → 传送面板按 F 确认。"""
+        from unittest.mock import MagicMock
+
+        from avc._core import KeyCode
+
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            MagicMock(
+                side_effect=[TeleportPanelKind.MARKER, TeleportPanelKind.TELEPORT]
+            ),
+        )
+        monkeypatch.setattr(
+            "abilities.tp_panel.close_marker_panel", lambda *a, **k: None
+        )
+        # 传送按钮文字未命中 → 走按 F 兜底，不产生额外 g.click
+        monkeypatch.setattr(
+            "abilities.tp_panel.find_teleport_button", lambda *a, **k: None
+        )
+        candidates = [self._rect(500, 400), self._rect(700, 600)]
+        tp._click_and_confirm_teleport(candidates)
+        assert g.click.call_count == 2
+        assert g.click.call_args_list[0].args == (500, 400)
+        assert g.click.call_args_list[1].args == (700, 600)
+        assert (KeyCode.f, 0.0) in ctx._press_log  # 传送面板 → 按 F 确认
+
+    def test_click_and_confirm_all_candidates_fail(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.MARKER,
+        )
+        monkeypatch.setattr(
+            "abilities.tp_panel.close_marker_panel", lambda *a, **k: None
+        )
+        tp._click_and_confirm_teleport([self._rect(500, 400), self._rect(700, 600)])
+        # 两个候选都点了（各自返回 False），最终未确认
+        assert g.click.call_count == 2
+
+    def test_click_and_confirm_uses_center_fallback(self, monkeypatch):
+        from abilities.tp_panel import TeleportPanelKind
+
+        tp, ctx, g = self._tp()
+        self._no_sleep(monkeypatch)
+        # 无面板可确认 → 短等后超时，仅验证兜底点击视口中心
+        monkeypatch.setattr("abilities.navigation.tp._CONFIRM_WAIT_TIMEOUT", 0.0)
+        monkeypatch.setattr(
+            "abilities.tp_panel.detect_tp_panel",
+            lambda *a, **k: TeleportPanelKind.NONE,
+        )
+        tp._click_and_confirm_teleport([])  # 空候选 → 兜底点视口中心
+        g.click.assert_called_once_with(960, 540)
 
 
 # ── path_executor 传送后锚定 navigator prev ──

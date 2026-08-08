@@ -78,6 +78,7 @@ class Navigator:
         """
         from avc._core import KeyCode
 
+        self.ctx.ensure_foreground()  # 移动全程 ic 直调，开头保证前台
         start_time = time.monotonic()
         last_record_time = start_time
         too_far_count = 0

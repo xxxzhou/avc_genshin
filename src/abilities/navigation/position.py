@@ -257,6 +257,10 @@ class PositionGetter:
                     expected_center, viewport.width, viewport.height
                 )
                 hit = fm.matchQueryLocal(viewport, rx, ry, rw, rh, _BIGMAP_EXPAND_CELLS)
+                # 局部失败（典型：zoom 很高时 query=整图，装不进局部窗口；或视口漂移）
+                # → 兜底全图匹配，避免连续失败触发 M 复位
+                if hit <= 0:
+                    hit = fm.matchQueryFull(viewport)
             else:
                 hit = fm.matchQueryFull(viewport)
             if hit <= 0:
@@ -751,17 +755,26 @@ class PositionGetter:
     # ── 256 地图坐标转换（BGI TeyvatMap，2048 缩放 ÷8）──
 
     def _game_to_map256(self, gx: float, gy: float) -> tuple[float, float]:
-        """游戏坐标 → 256 地图像素坐标。"""
+        """游戏坐标 → 256 地图像素坐标。
+
+        坐标轴对照 BGI TeyvatMapCoordinate.GameToMain：
+        - 游戏坐标第 0 轴（=position[0]，北向）映射底图 py
+        - 游戏坐标第 1 轴（=position[2]，西向）映射底图 px
+        即 px = ORIGIN_X - position[2]*SCALE, py = ORIGIN_Y - position[0]*SCALE。
+        """
         return (
-            MAP256_ORIGIN_X - gx * MAP256_SCALE,
-            MAP256_ORIGIN_Y - gy * MAP256_SCALE,
+            MAP256_ORIGIN_X - gy * MAP256_SCALE,
+            MAP256_ORIGIN_Y - gx * MAP256_SCALE,
         )
 
     def _map256_to_game(self, px: float, py: float) -> tuple[float, float]:
-        """256 地图像素坐标 → 游戏坐标。"""
+        """256 地图像素坐标 → 游戏坐标（_game_to_map256 的逆）。
+
+        返回 (position[0], position[2]) 序，与 tp.py TpPosition.x/y 一致。
+        """
         return (
-            (MAP256_ORIGIN_X - px) / MAP256_SCALE,
             (MAP256_ORIGIN_Y - py) / MAP256_SCALE,
+            (MAP256_ORIGIN_X - px) / MAP256_SCALE,
         )
 
     # ── MapBack 粗匹配坐标转换（委托 _MapLayer）──

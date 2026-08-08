@@ -15,6 +15,7 @@ fn 不在 loop 线程 → g.* 桥接不会死锁；fn 期间 loop 空闲跑守�
 from __future__ import annotations
 
 import asyncio
+import sys
 from threading import Thread
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -96,6 +97,8 @@ class Runtime:
         self._g: "HighLevelApi | None" = None
         self._nest_depth = 0  # ctx.run 嵌套深度（04 §6.2，上限 8）
 
+        self._hotkey_listener: "HotkeyListener | None" = None
+
         from framework.registry import TaskRegistry
 
         self.registry = registry or TaskRegistry()
@@ -116,6 +119,7 @@ class Runtime:
         self.loop.run_forever()
 
     def shutdown(self) -> None:
+        self._stop_hotkey()
         self.loop.call_soon_threadsafe(self.loop.stop)
         self._loop_thread.join(timeout=2)
 
@@ -159,6 +163,9 @@ class Runtime:
                 self.mount(d)
             except Exception as e:
                 observe.event("mount_error", level="warn", daemon=d, error=repr(e))
+
+        # F9 全局热键：按 F9 取消当前任务
+        self._start_hotkey(token)
 
         try:
             fut = asyncio.run_coroutine_threadsafe(self._worker(fn, timeout), self.loop)
@@ -218,6 +225,7 @@ class Runtime:
 
     def _teardown(self) -> None:
         """结束：卸载所有守护 + 释放按键 + 关日志（01 §8.4）。"""
+        self._stop_hotkey()
         self._stop_all_daemons()
         try:
             self.ctx.release_all_keys()
@@ -446,3 +454,28 @@ class Runtime:
             except CancelledError:
                 return
             await asyncio.sleep(0.1)
+
+    # ── 全局热键（F9 取消）──
+
+    def _start_hotkey(self, token: CancellationToken) -> None:
+        """注册 F9 全局热键，按 F9 触发 token.cancel()。"""
+        if sys.platform != "win32":
+            return
+        try:
+            from framework.hotkey import HotkeyListener, VK_F9
+
+            listener = HotkeyListener()
+            listener.register(VK_F9, callback=lambda: token.cancel("F9"))
+            listener.start()
+            self._hotkey_listener = listener
+        except Exception:
+            pass  # 热键注册失败不影响运行
+
+    def _stop_hotkey(self) -> None:
+        """停止热键监听。"""
+        if self._hotkey_listener is not None:
+            try:
+                self._hotkey_listener.stop()
+            except Exception:
+                pass
+            self._hotkey_listener = None

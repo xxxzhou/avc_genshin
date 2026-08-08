@@ -107,6 +107,9 @@ class MockContext:
     def click_at(self, x, y, button="left"):
         pass
 
+    def ensure_foreground(self, wait_s=0.0):
+        return True
+
 
 def _make_dctx(ctx=None, scene=None, frame=None, detections=None):
     """创建测试用 DaemonCtx。"""

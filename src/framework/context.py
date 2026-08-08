@@ -33,6 +33,17 @@ if TYPE_CHECKING:  # 仅类型标注用，运行时不导入 avc
     from avc.vision import ITemplateMatcher, ITextRecognizer
 
 
+class _RECT(ctypes.Structure):
+    """Win32 RECT（GetWindowRect/GetClientRect 用，本进程系统 DPI=96 时返回物理像素）。"""
+
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
 def _import_avc():
     """惰性导入 avc + MouseButton。失败给清晰的安装/配置提示。"""
     try:
@@ -53,6 +64,7 @@ class GameContext:
         Input, Vision, Image, MouseButton, YuvType = _import_avc()
 
         self.cfg = cfg or _default_config
+        self.window_title = window_title  # 前台检查/激活用（ensure_foreground）
         # 拟人化 RNG 与 config 对齐（可复现 / 真随机）
         utils.set_seed(self.cfg.jitter_seed)
 
@@ -223,22 +235,122 @@ class GameContext:
                 pass  # crop/resize 失败回退原始 buffer
         return buf
 
+    def _window_geometry(
+        self,
+    ) -> tuple[int, int, int, int, int, int] | None:
+        """当前窗口物理几何：(win_l, win_t, side_border, top_border, cli_w, cli_h)。
+
+        ⚠ DPI 说明（2026-08-08 实机探针定位）：本进程 DPI-unaware 且系统 DPI 常为 96，
+        GetWindowRect/GetClientRect 因此返回**物理像素**；而 avc 的 ``sc.toScreen`` 却用
+        窗口 DPI（如 240）把坐标逻辑化（span 缩小 1/dpi），与 ``ic.moveTo``（物理像素）
+        不同空间 —— 这就是鼠标偏左上的根因，to_screen 必须绕开 sc.toScreen。
+
+        GetClientRect 在个别环境可能被 DPI 虚拟化（返回逻辑值）：当 ``cli×dpi`` 比原始值
+        更接近窗口尺寸时判定为逻辑值并还原成物理。
+        """
+        if sys.platform != "win32":
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW(None, self.window_title)
+            if not hwnd:
+                return None
+            wr = _RECT()
+            cr = _RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(wr))
+            user32.GetClientRect(hwnd, ctypes.byref(cr))
+            win_w = wr.right - wr.left
+            win_h = wr.bottom - wr.top
+            cli_w, cli_h = cr.right, cr.bottom
+            if cli_w <= 0 or cli_h <= 0 or win_w <= 0 or win_h <= 0:
+                return None
+            # 判定 GetClientRect 是否被 DPI 虚拟化（逻辑值还原后应接近窗口尺寸）
+            dpi = self._dpi_scale or 1.0
+            if abs(cli_w * dpi - win_w) < abs(cli_w - win_w):
+                cli_w, cli_h = int(cli_w * dpi), int(cli_h * dpi)
+            if cli_w >= win_w or cli_h >= win_h:
+                return None
+            side = (win_w - cli_w) // 2
+            top = win_h - cli_h - side
+            return wr.left, wr.top, side, top, cli_w, cli_h
+        except Exception:
+            return None
+
     def to_screen(self, buf_x: float, buf_y: float) -> tuple[int, int]:
-        """1080p buffer 坐标 → 屏幕坐标（加回边框偏移后经 sc.toScreen 转换）。"""
-        # buffer 坐标是裁剪后的 1080p 坐标，需加回边框偏移才能对应原始 buffer
-        wx = int(buf_x) + self._border_left
-        wy = int(buf_y) + self._border_top
-        sp = self.sc.toScreen(wx, wy)
-        if not sp:
+        """1080p buffer 坐标 → 物理屏幕坐标（供 ic.moveTo 使用）。
+
+        每次现算窗口几何（免疫窗口缩放），1080p 线性映射到客户区：
+            屏_x = win_left + 侧边框 + buf_x × 客户宽/1920
+            屏_y = win_top  + 顶边框 + buf_y × 客户高/1080
+        返回物理像素，与 ``ic.moveTo``/``getCursorPos`` 同一空间。
+        """
+        g = self._window_geometry()
+        if g is None:
             # fallback: 无窗口时 buffer 坐标即屏幕坐标（测试/mock 场景）
             return int(buf_x), int(buf_y)
-        return sp.x, sp.y
+        win_l, win_t, side, top, cli_w, cli_h = g
+        sx = win_l + side + buf_x * cli_w / 1920.0
+        sy = win_t + top + buf_y * cli_h / 1080.0
+        return int(sx), int(sy)
 
     def save_debug(self, path: str) -> None:
         """保存当前帧到 debug/ 存证。"""
         self.sc.save(path)
 
     # ── 输入（拟人化由框架层套用；avc 无 setHumanize）──
+
+    def ensure_foreground(self, wait_s: float = 0.2) -> bool:
+        """确保游戏窗口在前台（程序自保证，不依赖手动切窗）。
+
+        每次鼠标/键盘操作前调用，保证操作发到游戏而非其它窗口。三步：
+        1. 零开销检查：GetForegroundWindow 标题已是游戏 → 直接返回 True。
+        2. 最小化则先还原（ShowWindow SW_RESTORE）——最小化窗口激活无效。
+        3. 激活：AVC activateWindow + ALT 键技巧绕过 Windows 前台锁
+           （后台进程直接 SetForegroundWindow 常被 Windows 拒绝）。
+
+        Returns:
+            True=已在前台（无需激活）；False=刚激活过。非 Windows / 检查失败返回 True（不阻断）。
+        """
+        if sys.platform != "win32":
+            return True
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW(None, self.window_title)
+            if hwnd:
+                # 1) 最小化 → 先还原（SW_RESTORE=9）。最小化窗口无渲染帧，
+                #    SourcePlayer 截不到图，且激活无效——必须最先处理。
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)
+                    utils.sleep(0.2)
+                # 2) 已在后台前 → 零开销返回
+                fg = user32.GetForegroundWindow()
+                if fg and fg == hwnd:
+                    return True
+                if fg:
+                    n = user32.GetWindowTextLengthW(fg)
+                    if n > 0:
+                        buf = ctypes.create_unicode_buffer(n + 1)
+                        user32.GetWindowTextW(fg, buf, n + 1)
+                        if self.window_title.lower() in buf.value.lower():
+                            return True
+                # 3) 激活：avc 激活 + ALT 技巧绕过前台锁
+                try:
+                    self.sc.activateWindow(self.window_title)
+                except Exception:
+                    pass
+                user32.keybd_event(0x12, 0, 0, 0)  # ALT down
+                user32.SetForegroundWindow(hwnd)
+                user32.keybd_event(0x12, 0, 2, 0)  # ALT up
+            else:
+                try:
+                    self.sc.activateWindow(self.window_title)
+                except Exception:
+                    pass
+            if wait_s > 0:
+                utils.sleep(wait_s)  # 前台切换后稍候，避免操作落在旧窗口
+            return False
+        except Exception:
+            return True
 
     def _humanize_on(self) -> bool:
         return self.cfg.humanize
@@ -249,6 +361,7 @@ class GameContext:
         拟人化：坐标 ±像素抖动、moveTo 走 avc 动画（setMoveDurationMs）、
         按住时长随机（click_hold_ms 区间）。
         """
+        self.ensure_foreground()
         btn = self._MouseButton[button] if isinstance(button, str) else button
         sx, sy = self.to_screen(bx, by)
         if self._humanize_on():
@@ -265,6 +378,7 @@ class GameContext:
 
     def press(self, key, hold: float = 0.0) -> None:
         """按键。hold 秒（拟人化时叠加 0.8–1.2× 抖动）。"""
+        self.ensure_foreground()
         hold_ms = int(hold * 1000)
         if self._humanize_on() and hold_ms > 0:
             hold_ms = int(utils.jitter(hold_ms, self.cfg.op_jitter))
@@ -272,9 +386,11 @@ class GameContext:
 
     def hotkey(self, *keys) -> None:
         """组合键（如 hotkey(KeyCode.ctrl, KeyCode.c)）。"""
+        self.ensure_foreground()
         self.ic.hotkey(*keys)
 
     def type_text(self, text: str) -> None:
+        self.ensure_foreground()
         self.ic.typeText(text)
 
     # ── 运行时控制（委托 Runtime；Runtime 构造时绑定 self.runtime）──
@@ -332,65 +448,33 @@ class GameContext:
     # ── DPI / 窗口边框计算 ──
 
     def _calc_window_offsets(self, window_title: str) -> None:
-        """用 Win32 API + avc buffer 实际像素 计算窗口边框偏移和 DPI 缩放比。
+        """用 Win32 API 计算窗口边框偏移和 DPI 缩放比。
 
         avc 截图 buffer 包含整个窗口（含标题栏+边框），但下游代码需要纯游戏画面。
-        这里算出边框在 buffer 中的像素偏移，供 capture() 裁剪和 to_screen() 坐标转换。
+        这里算出边框偏移，供 capture() 裁剪（IScreenCapture 回退路径）使用。
 
-        计算逻辑：
-        1. ib.width/height → buffer 实际像素尺寸（含边框，不受 DPI 影响）
-        2. GetClientRect → 客户区逻辑尺寸（DPI 缩放后）
-        3. GetDpiForWindow → DPI 缩放比
-        4. 客户区真实像素 = ClientRect × DPI/96
-        5. border_left = (buffer_width - client_real_width) // 2
-        6. border_top = buffer_height - client_real_height - border_left
-           （假设左右边框等宽，底边框=左右边框）
+        本进程 DPI-unaware 且系统 DPI 常为 96 → GetWindowRect/GetClientRect 返回物理像素，
+        无需再乘 DPI（旧实现把已物理的 GetClientRect 又乘 2.5 得到 3200×1800，导致边框陈旧
+        且误判——2026-08-08 实机定位）。逻辑/物理判定交给 ``_window_geometry`` 统一处理。
 
-        ⚠ 不能用 GetWindowRect 算：DPI 缩放下它返回逻辑像素，不是真实像素。
-        非 Windows 平台或找不到窗口时保持默认值 0（无边框偏移）。
+        注意：窗口缩放后此值可能陈旧；``to_screen`` 已改为每次现算几何（见 _window_geometry），
+        不受影响。非 Windows 或找不到窗口时保持默认值 0。
         """
         if sys.platform != "win32":
             return
         try:
             user32 = ctypes.windll.user32
-
-            class RECT(ctypes.Structure):
-                _fields_ = [
-                    ("left", ctypes.c_long),
-                    ("top", ctypes.c_long),
-                    ("right", ctypes.c_long),
-                    ("bottom", ctypes.c_long),
-                ]
-
             hwnd = user32.FindWindowW(None, window_title)
             if not hwnd:
                 return
-
-            # DPI 缩放比
             dpi = user32.GetDpiForWindow(hwnd)
             if dpi > 0:
                 self._dpi_scale = dpi / 96.0
-
-            # buffer 实际像素尺寸（含边框）
-            nb = self.sc.getBuffer()
-            if not nb:
+            g = self._window_geometry()
+            if g is None:
                 return
-            ib = self._Image.IImageBuffer(nb)
-            buf_w, buf_h = ib.width, ib.height
-
-            # 客户区逻辑尺寸 → 真实像素
-            cli_rect = RECT()
-            user32.GetClientRect(hwnd, ctypes.byref(cli_rect))
-            cli_real_w = int(cli_rect.right * self._dpi_scale)
-            cli_real_h = int(cli_rect.bottom * self._dpi_scale)
-
-            # 边框偏移（buffer 坐标系 = 真实像素）
-            # 左右边框等宽，底边框=左右边框
-            border_h = (buf_w - cli_real_w) // 2
-            border_v_top = buf_h - cli_real_h - border_h
-
-            if border_h >= 0 and border_v_top >= 0:
-                self._border_left = border_h
-                self._border_top = border_v_top
+            _, _, side, top, _, _ = g
+            self._border_left = side
+            self._border_top = top
         except Exception:
             pass  # Win32 API 失败时保持默认值 0

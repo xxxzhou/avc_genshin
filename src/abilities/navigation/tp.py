@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from avc._core import KeyCode
     from avc.image import IImageBuffer
 
+    from abilities.vision_utils import Rect
     from framework.context import GameContext
     from framework.high_level_api import HighLevelApi
 
@@ -167,7 +169,8 @@ _TELEPORT_WAIT_MAIN_UI_TIMEOUT = 60.0  # 传送完成后等待主界面的超时
 
 # 导航循环（对照 BGI MoveMapToCore）
 _MAX_NAV_ITER = 30  # 拖拽循环最大迭代数（BGI MaxIterations）
-_MAX_NAV_FAILS = 3  # 连续 SIFT 定位失败上限 → 中止
+_MAX_NAV_FAILS = 3  # 连续 SIFT 定位失败上限 → 触发地图复位
+_MAP_RESET_LIMIT = 3  # 地图复位（M 关/开图）上限，超过仍失败 → 中止
 _MOVE_TOLERANCE = 200.0  # 目标进入容差即停止拖拽（game 单位，BGI Tolerance）
 _MAP_ZOOM_OUT_DISTANCE = 1500.0  # 远距先缩小阈值（game 单位，≈BGI MapZoomOutDistance 1000px@zoom4）
 _TELEPORT_MAX_ZOOM = 6.0  # 最大缩小档（BGI TeleportMaxZoomLevel）
@@ -208,15 +211,22 @@ class Teleporter:
         if target is None:
             raise ValueError(f"未找到传送点: {name_or_pos}")
 
+        # 0. 确保原神窗口在前台：后续大量鼠标/键盘操作，焦点不在游戏则全部落空
+        try:
+            self.ctx.sc.activateWindow("原神")
+        except Exception:
+            pass
+        utils.sleep(0.3)
+
         # 2. 打开地图
         self._open_map()
 
-        # 3. 拖拽地图到目标区域并点击
-        self._navigate_map_to_target(target)
+        # 3. 拖拽地图到目标区域，返回候选点击点（按距视口中心排序）
+        candidates = self._navigate_map_to_target(target)
 
-        # 4. 等待传送面板确认（quick_teleport 守护会自动确认）
-        #    如果守护未激活，手动检测并确认
-        self._wait_and_confirm_teleport()
+        # 4. 依次点击候选图标并确认传送面板（quick_teleport 守护也会自动确认）
+        #    点击命中自定义标记 pin → 打开标记面板 → Esc 关闭后换下一候选重试
+        self._click_and_confirm_teleport(candidates)
 
         # 5. 等待传送完成
         self.g.wait_main_ui(timeout=_TELEPORT_WAIT_MAIN_UI_TIMEOUT)
@@ -254,46 +264,91 @@ class Teleporter:
         # 等待 MAP 场景
         self.g.wait_scene(Scene.MAP, timeout=10.0)
 
-    def _navigate_map_to_target(self, target: TpPosition) -> None:
-        """在地图上拖拽到目标位置并点击传送点图标。
+    def _reset_map_view(self) -> None:
+        """大地图视口复位：SIFT 连续定位失败（视口漂到海洋/未开放区）时，
+        按 M 关图再开图，地图会以玩家当前位置为中心重新定位。
+
+        用户建议：定位不到时"先 M 回去，再 M 打开重新定位"。
+        复位后 zoom 保持，但视口回到玩家所在陆地。
+        """
+        from avc._core import KeyCode
+
+        from framework.scene import Scene
+
+        self.ctx.release_all_keys()
+        utils.sleep(0.3)
+        self.ctx.press(KeyCode.m)  # 关图
+        utils.sleep(0.6)
+        self.ctx.press(KeyCode.m)  # 重开，以玩家为中心
+        self.g.wait_scene(Scene.MAP, timeout=10.0)
+        utils.sleep(0.5)
+
+    def _navigate_map_to_target(self, target: TpPosition) -> "list[Rect]":
+        """在地图上拖拽到目标位置，返回候选传送点图标点击位置。
 
         对照 BGI TpOnce 阶段 3-5（MoveMapToCore + ClickTeleportTargetMapPoint）：
         切地面层 → 切国家 tab → SIFT 视口重定位循环（定位→算偏移→拖拽→重定位，
-        直到目标进入容差）→ 放大让图标显示 → 匹配目标 type 图标 → 点击。
+        直到目标进入容差）→ 放大让图标显示 → 匹配目标 type 图标 → 返回候选。
 
-        v1 简化：异常检测只做"连续 N 次定位失败中止"；图标匹配取最近型命中
+        返回按距视口中心升序的候选图标（点击留到 _click_and_confirm_teleport，
+        因为玩家自定义标记可能覆盖部分图标，需逐个点击+OCR 确认换点重试）；
+        无命中时兜底返回视口中心。
+
+        v1 简化：异常检测只做"连续 N 次定位失败中止"；图标匹配取最近型候选
         （不做 BGI 匈牙利算法相对模式，留 v2）。
         """
         from abilities.navigation.map_ops import DISPLAY_TP_ZOOM, MapController
         from framework.scene import Scene
 
         if self.g.scene is None or self.g.scene.scene is not Scene.MAP:
+            print(f"[tp] 不在 MAP 场景，跳过导航（scene={self.g.scene}）", file=sys.stderr)
             return
 
         mc = MapController(self.ctx, self.g)
         frame = self.ctx.capture()
+        z0 = mc.measure_zoom_level(frame)
+        print(f"[tp] 初始 zoom={z0}", file=sys.stderr)
 
         # 1. 切地面层（传送入口默认走地面）
-        mc.switch_to_ground_layer(frame)
+        grounded = mc.switch_to_ground_layer(frame)
+        print(f"[tp] switch_to_ground_layer={grounded}", file=sys.stderr)
         frame = self.ctx.capture()
 
-        # 2. 切国家 tab（按 target.country，Teyvat 7 国）
-        if target.country:
-            mc.switch_country(target.country, frame)
-            frame = self.ctx.capture()
+        # 2. 切国家 tab（v1 禁用：实机确认 (1760,1020) 按钮本版本点不开国家列表，
+        #    且点击会误动地图/可能弹面板拦截后续拖拽。SIFT 定位+拖拽可自行跨区收敛。
+        #    留 v2：换按钮位置 + OCR ReplaceDictionary（蒙德→蒙徳）。）
+        # if target.country:
+        #     ok = mc.switch_country(target.country, frame)
+        #     print(f"[tp] switch_country({target.country})={ok}", file=sys.stderr)
+        #     frame = self.ctx.capture()
 
         # 3. MoveMapToCore 循环：SIFT 定位视口 → 算偏移 → 拖拽 → 重定位
-        # 首轮无 expected（全图 Match）；后续传上轮 center（切块局部，BGI KnnMatchLocal）
+        # 首轮无 expected（全图 Match）；后续传上轮 center（切块局部，BGI KnnMatchLocal）。
+        # 定位连续失败（典型：视口漂到海洋/未开放区）→ M 关/开图复位到玩家位置再继续。
         fail_streak = 0
+        reset_count = 0
         last_center: tuple[float, float] | None = None
-        for _ in range(_MAX_NAV_ITER):
+        for i in range(_MAX_NAV_ITER):
             center = self._big_map_position(last_center)
             if center is None:
                 fail_streak += 1
+                print(f"[tp] iter{i} SIFT 定位失败（fail_streak={fail_streak}）", file=sys.stderr)
                 if fail_streak >= _MAX_NAV_FAILS:
-                    raise RuntimeError(
-                        f"大图视口连续 {fail_streak} 次 SIFT 定位失败，无法导航到 {target.name}"
+                    if reset_count >= _MAP_RESET_LIMIT:
+                        raise RuntimeError(
+                            f"大图视口连续 {fail_streak} 次 SIFT 定位失败"
+                            f"且复位 {reset_count} 次仍无法导航到 {target.name}"
+                        )
+                    reset_count += 1
+                    fail_streak = 0
+                    last_center = None
+                    print(
+                        f"[tp] SIFT 连续失败，M 关/开图复位（第 {reset_count}/{_MAP_RESET_LIMIT} 次）",
+                        file=sys.stderr,
                     )
+                    self._reset_map_view()
+                    frame = self.ctx.capture()
+                    continue
                 utils.sleep(0.3)
                 frame = self.ctx.capture()
                 continue
@@ -303,6 +358,11 @@ class Teleporter:
             dx = target.x - center[0]
             dy = target.y - center[1]
             dist = math.hypot(dx, dy)
+            print(
+                f"[tp] iter{i} center=({center[0]:.0f},{center[1]:.0f}) "
+                f"target=({target.x:.0f},{target.y:.0f}) dx={dx:.0f} dy={dy:.0f} dist={dist:.0f}",
+                file=sys.stderr,
+            )
             if dist < _MOVE_TOLERANCE:
                 break  # 目标进入容差 → 去点图标
 
@@ -321,33 +381,92 @@ class Teleporter:
         mc.set_zoom_level(DISPLAY_TP_ZOOM, frame)
         frame = self.ctx.capture()
 
-        # 5. 匹配目标 type 图标并点击；未命中兜底点视口中心（最后一次定位处）
-        icon = mc.find_tp_icon(target.type, frame)
-        if icon is not None:
-            self.g.click(icon.cx, icon.cy)
-        else:
-            self.g.click(_MAP_CENTER_X, _MAP_CENTER_Y)
+        # 5. 匹配目标 type 图标，返回候选点击点；未命中兜底视口中心（最后一次定位处）
+        icons = mc.find_tp_icons(target.type, frame)
+        if icons:
+            for ic in icons:
+                print(f"[tp] 命中 {target.type} 图标 @({ic.cx:.0f},{ic.cy:.0f})", file=sys.stderr)
+            return icons
+        print(f"[tp] 未命中 {target.type} 图标，兜底点视口中心", file=sys.stderr)
+        return [self._center_rect()]
 
-    def _wait_and_confirm_teleport(self) -> None:
-        """等待传送确认面板出现并点击传送按钮（兜底）。
+    @staticmethod
+    def _center_rect() -> "Rect":
+        """视口中心兜底点击点。"""
+        from abilities.vision_utils import Rect
+
+        return Rect(_MAP_CENTER_X, _MAP_CENTER_Y, 0, 0, 0.0)
+
+    def _click_and_confirm_teleport(self, candidates: "list[Rect]") -> None:
+        """依次点击候选传送点图标并 OCR 确认传送面板。
+
+        对照 BGI ClickTpPoint + HandleTeleportPanel（2417-2442）：
+        - 点击后检测到传送面板（OCR '传送'）→ 点击按钮/按 F 确认，完成
+        - 点击命中自定义标记 → 打开标记面板（OCR '追踪'/'总标记' 等）→ Esc 关闭，
+          换下一个候选图标重试（避 pin：优先点无标记覆盖的锚点）
+        - 无面板 → 短等后换下一候选
+        """
+        if not candidates:
+            candidates = [self._center_rect()]
+        for icon in candidates[:_TELEPORT_RETRY_COUNT]:
+            print(f"[tp] 点击候选图标 @({icon.cx:.0f},{icon.cy:.0f})", file=sys.stderr)
+            self.g.click(icon.cx, icon.cy)
+            try:
+                self.ctx.save_debug("debug/after_icon_click.png")  # 存帧看点击后画面
+            except Exception:
+                pass
+            if self._wait_and_confirm_teleport():
+                return
+        print("[tp] 所有候选图标均未确认传送面板", file=sys.stderr)
+
+    def _wait_and_confirm_teleport(self) -> bool:
+        """等待传送确认面板出现并确认（OCR 面板检测，兜底）。
 
         quick_teleport 守护（Scene.MAP 下活跃）是主确认路径；本方法在守护未挂载时兜底。
-        用模板匹配 GoTeleport 按钮真实位置（替代硬编码坐标）。
+        对照 BGI TpTask.HandleTeleportPanel（2417-2442）：检测到传送按钮后点击/按 F 确认。
+
+        返回 True 表示已确认传送；False 表示未确认（标记面板已关闭 / 超时），
+        调用方应换下一个候选图标重试。
         """
         import time
 
-        from abilities import vision_utils as vu
-        from abilities.game_state import has_go_teleport
+        from avc._core import KeyCode
+
+        from abilities.tp_panel import (
+            TeleportPanelKind,
+            close_marker_panel,
+            detect_tp_panel,
+            find_teleport_button,
+        )
 
         deadline = time.time() + _CONFIRM_WAIT_TIMEOUT
         while time.time() < deadline:
             frame = self.ctx.capture()
-            if frame is not None and has_go_teleport(self.ctx, frame):
-                rect = vu.find_template(self.ctx, "teleport/GoTeleport.png", frame=frame)
-                if rect is not None:
-                    self.g.click(rect.cx, rect.cy)
-                    return
+            kind = detect_tp_panel(self.ctx, frame)
+            print(f"[tp] confirm: panel={kind.name}", file=sys.stderr)
+            if kind is TeleportPanelKind.TELEPORT:
+                try:
+                    self.ctx.save_debug("debug/go_teleport_detected.png")  # 存帧诊断面板实际状态
+                except Exception:
+                    pass
+                btn = find_teleport_button(self.ctx, frame)
+                if btn is not None:
+                    print(f"[tp] 点击传送按钮 @({btn.cx:.0f},{btn.cy:.0f})", file=sys.stderr)
+                    self.g.click(btn.cx, btn.cy)
+                else:
+                    # OCR 未定位到按钮文字，按 F 兜底（BGI HandleTeleportPanel 按 F）
+                    print("[tp] 传送面板已检测到但按钮文字未命中，按 F 确认", file=sys.stderr)
+                    self.ctx.press(KeyCode.f)
+                return True
+            if kind is TeleportPanelKind.MARKER:
+                print(
+                    "[tp] 命中标记面板（自定义标记覆盖传送点），Esc 关闭后返回 False 重试",
+                    file=sys.stderr,
+                )
+                close_marker_panel(self.ctx)
+                return False
             utils.sleep(0.3)
+        return False
 
     def _big_map_position(
         self, expected: tuple[float, float] | None = None
