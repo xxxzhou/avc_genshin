@@ -43,9 +43,10 @@ if TYPE_CHECKING:
 _ARRIVE_DISTANCE = 8.0
 _TOO_FAR_DISTANCE = 500.0  # 过远距离阈值
 _MOVE_TIMEOUT = 240.0  # 移动超时(秒)
-_STEER_SLEEP_S = 0.25  # 每轮转向后等待（相机转完 + 角色转向；diag_moveto 用 0.4s 收敛）
+_STEER_SLEEP_S = 0.1  # rotate_camera_to_target 内部已含 _SETTLE_S 等待，此处仅补短间隔
 _POSITION_RECORD_INTERVAL = 1.0  # 位置记录间隔(秒)
 _JUMP_INTERVAL_S = 2.0  # jump 移动模式周期跳间隔
+_REORIENT_THRESHOLD = 15.0  # 角度差超过此值时停步闭环转向（避免移动中转向不足导致偏航/卡地形）
 
 
 class Navigator:
@@ -96,8 +97,18 @@ class Navigator:
             is_jump = mode == "jump"  # 周期跳
             last_jump = start_time
 
-            # 不做初始 rotate_to（空闲大角度旋转会轻推走路撞地形）；移动循环里用
-            # rotate_camera_to_target 边走边转向（移动中面朝自动同步相机，见 camera.py）。
+            # 初始转向：用 rotate_to 闭环收敛到目标朝向（避免大角度差时边走边转向
+            # 导致角色在错误方向越走越远）。max_diff=5° 足够小，后续移动循环里
+            # rotate_camera_to_target 会继续微调。
+            start_pos = self._position_getter.get_position()
+            if start_pos is not None:
+                target_angle = CameraControl.target_orientation(start_pos, (waypoint.x, waypoint.y))
+                current_angle = self._camera.get_orientation()
+                if current_angle is not None:
+                    angle_diff = self._camera._angle_diff(current_angle, target_angle)
+                    if abs(angle_diff) > 30:  # 大角度差才预转向
+                        self._camera.rotate_to(target_angle, max_diff=5.0)
+
             # fly: 先跳起进入滑翔（实机验证空格键进入滑翔）
             if mode == "fly":
                 try:
@@ -174,8 +185,41 @@ class Navigator:
                         pass
                     last_jump = time.monotonic()
 
-                # 转向：移动中纯相机旋转（不 nudge、不打断 W；面朝自动同步相机）
-                self._camera.rotate_camera_to_target(position, (waypoint.x, waypoint.y))
+                # 转向：检查角度差，大角度差时停步闭环转向
+                target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
+                current_angle = self._camera.get_orientation()
+                if current_angle is not None:
+                    angle_diff = self._camera._angle_diff(current_angle, target_angle)
+                    if abs(angle_diff) > _REORIENT_THRESHOLD:
+                        # 角度差过大：松开 W → 闭环转向 → 重新按住 W
+                        # 避免移动中 rotate_camera_to_target 单次转向不足导致偏航/卡地形
+                        try:
+                            self.ctx.ic.keyUp(KeyCode.w)
+                        except Exception:
+                            pass
+                        # 闭环转向：rotate_to 内部每轮 move_by_rel + settle + nudge_sync
+                        # nudge_sync 会推动角色前进，位置漂移后 target_angle 变化，
+                        # 故 rotate_to 完成后须重新读位置算 target_angle，
+                        # 若仍 > REORIENT 则继续转向（而非回主循环触发又一轮停步-转向）
+                        for _reorient in range(10):  # 最多 10 轮闭环
+                            self._camera.rotate_to(target_angle, max_diff=5.0)
+                            # 重新读位置算 target_angle
+                            new_pos = self._position_getter.get_position()
+                            if new_pos is not None:
+                                position = new_pos
+                                target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
+                            new_angle = self._camera.get_orientation()
+                            if new_angle is None:
+                                break
+                            if abs(self._camera._angle_diff(new_angle, target_angle)) <= _REORIENT_THRESHOLD:
+                                break
+                        try:
+                            self.ctx.ic.keyDown(KeyCode.w)
+                        except Exception:
+                            pass
+                    else:
+                        # 小角度差：移动中纯相机旋转（不 nudge、不打断 W）
+                        self._camera.rotate_camera_to_target(position, (waypoint.x, waypoint.y))
 
                 time.sleep(_STEER_SLEEP_S)
 

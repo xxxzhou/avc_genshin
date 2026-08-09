@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+claude --dangerously-skip-permissions
+
 > 本项目指导文件。**新会话读本文件 + `任务进度.md` + `设计实现.md` 即可上手。**
 > avc_genshin 处于设计/早期实现阶段，本文描述目标架构。
 

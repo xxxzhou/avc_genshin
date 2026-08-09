@@ -253,6 +253,94 @@ class HighLevelApi:
         self._observe("action", action="teleport_to", target=str(name_or_pos))
         return result
 
+    def find_blossom_and_nearest_tp(self, flower_type: str = "") -> dict | None:
+        """在大地图上找地脉花，返回花信息和最近传送点。
+
+        需在 MAP 场景下调用（由调用方保证先打开地图）。
+        流程：检测花图标 → SIFT 定位视口 → 屏幕坐标转游戏坐标 → 查最近传送点。
+
+        Args:
+            flower_type: 筛选花类型，""=不限，"revelation"=启示之花，"wealth"=藏金之花
+
+        Returns:
+            {"blossom_type": str, "blossom_pos": (x,y), "nearest_tp": TpPosition, "screen_pos": (x,y)}
+            或 None（未检测到花 / SIFT 定位失败）
+        """
+        from abilities.navigation.map_ops import MapController, MAP_CENTER_X, MAP_CENTER_Y, MAP_SCALE_FACTOR
+        from abilities.navigation.position import PositionGetter
+        from abilities.navigation.tp import TpDatabase
+        from framework import utils
+
+        mc = MapController(self.ctx, self)
+        frame = self.ctx.capture()
+        if frame is None:
+            return None
+
+        # ★ 调整缩放到固定等级再检测（BGI LocateLeyLineOutcrop 做法）
+        # 高 zoom 下 SIFT 误差被放大，坐标偏移大→选错传送点。
+        # 调到 ~3.0 后花图标仍可见，误差放大系数减小。
+        # ⚠ 注意：放大时视口范围缩小，需先把花移到中心避免丢失。
+        zoom = mc.measure_zoom_level(frame) or 3.0
+        blossoms = mc.find_blossom_on_map(frame)
+        if blossoms:
+            # 把最近的花移到视口中心，再缩放
+            best = blossoms[0]
+            north_delta = (MAP_CENTER_Y - best.screen_y) * zoom / MAP_SCALE_FACTOR
+            west_delta = (MAP_CENTER_X - best.screen_x) * zoom / MAP_SCALE_FACTOR
+            if abs(north_delta) > 100 or abs(west_delta) > 100:
+                mc.drag_map(north_delta, west_delta, zoom)
+                utils.sleep(0.3)
+                frame = self.ctx.capture()
+                if frame is None:
+                    return None
+        mc.set_zoom_level(3.0, frame)
+        utils.sleep(0.3)
+        frame = self.ctx.capture()
+        if frame is None:
+            return None
+
+        # 1. 检测花图标
+        blossoms = mc.find_blossom_on_map(frame)
+        if flower_type:
+            blossoms = [b for b in blossoms if b.blossom_type == flower_type]
+        if not blossoms:
+            return None
+
+        # 2. SIFT 定位视口中心
+        pg = PositionGetter(self.ctx)
+        viewport = pg.get_position_from_big_map(frame)
+        if viewport is None:
+            return None
+
+        # 3. 测量缩放
+        zoom = mc.measure_zoom_level(frame)
+        if zoom is None:
+            zoom = 3.0  # 兜底默认
+
+        # 4. 取最近视口中心的花，转游戏坐标
+        best = blossoms[0]
+        game_pos = mc.screen_to_game(best.screen_x, best.screen_y, viewport, zoom)
+
+        # 5. 查最近传送点
+        db = TpDatabase()
+        nearest = db.find_nearest(game_pos[0], game_pos[1], n=1)
+        if not nearest:
+            return None
+
+        self._observe(
+            "action",
+            action="find_blossom",
+            blossom_type=best.blossom_type,
+            pos=f"({game_pos[0]:.0f},{game_pos[1]:.0f})",
+            nearest_tp=nearest[0].name,
+        )
+        return {
+            "blossom_type": best.blossom_type,
+            "blossom_pos": game_pos,
+            "nearest_tp": nearest[0],
+            "screen_pos": (best.screen_x, best.screen_y),
+        }
+
     def go_to(self, pos, *, tolerance: float = 4.0, timeout: float = 240.0) -> bool:
         """走到指定位置（Phase B 实现）。
 

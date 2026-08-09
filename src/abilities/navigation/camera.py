@@ -163,6 +163,9 @@ class CameraControl:
         按住 W 时 +600px → 面朝 +21.3°），无需轻推 W，也不打断持续行走。
         go_to 每轮调此方法持续转向（diag_moveto [B]：dist 单调下降、diff→0）。
         空闲态需用 ``rotate_to``（内含轻推同步）。
+
+        ⚠ 调用后须等相机旋转惯性结束再读朝向（约 1.5s，见 _SETTLE_S），
+        否则读数是中间值 → diff 错误 → 过度旋转/振荡。
         """
         target_angle = CameraControl.target_orientation(from_pos, to_pos)
         current = self.get_orientation()
@@ -174,6 +177,8 @@ class CameraControl:
         move_x = int(round(-diff * _PX_PER_DEG))
         move_x = max(-_MAX_MOVE_PX, min(_MAX_MOVE_PX, move_x))
         self.ctx.move_by_rel(move_x, 0)
+        # 等相机旋转惯性结束（移动中面朝自动同步，无需 nudge，但须等相机停稳）
+        time.sleep(_SETTLE_S)
         return diff
 
     @staticmethod

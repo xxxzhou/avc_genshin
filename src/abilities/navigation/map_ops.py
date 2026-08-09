@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from framework import utils
@@ -102,6 +103,23 @@ _TP_ICON_BY_TYPE: dict[str, str] = {
 _DOMAIN_TYPES = frozenset(
     {"OneTimeDomain", "BlessDomain", "ForgeryDomain", "MasteryDomain", "TrounceDomain"}
 )
+
+# ── 地脉花图标模板 ──
+_BLOSSOM_TEMPLATES: dict[str, str] = {
+    "revelation": "map/Blossom_of_Revelation.png",
+    "wealth": "map/Blossom_of_Wealth.png",
+}
+_BLOSSOM_THRESHOLD = 0.6  # 地脉花图标匹配阈值（比传送点低，花图标较小/变化多）
+
+
+@dataclass(frozen=True, slots=True)
+class BlossomCandidate:
+    """大地图上检测到的地脉花候选。"""
+
+    screen_x: float  # 花中心在 1080p buffer 上的 X
+    screen_y: float  # 花中心在 1080p buffer 上的 Y
+    blossom_type: str  # "revelation" | "wealth"
+    score: float  # 模板匹配分数
 
 
 class MapController:
@@ -331,8 +349,77 @@ class MapController:
             paths.append("teleport/Domain2.png")
         return paths
 
+    # ── 地脉花检测 ──
 
-# 模块级常量导出（供 tp.py 复用）
+    def find_blossom_on_map(self, frame=None) -> list[BlossomCandidate]:
+        """在大地图上检测地脉花图标，返回候选列表（按距视口中心距离升序）。
+
+        同时匹配启示之花和藏金之花模板。需在 MAP 场景下调用，
+        缩放等级需让花图标可见（zoom ≤ 3 左右，花图标在缩小级别显示）。
+        """
+        paths = list(_BLOSSOM_TEMPLATES.values())
+        # 反向映射：模板文件名 → blossom_type
+        name_to_type: dict[str, str] = {
+            _BLOSSOM_TEMPLATES[k].split("/")[-1]: k for k in _BLOSSOM_TEMPLATES
+        }
+        found = vu.find_all_templates(
+            self.ctx, paths, threshold=_BLOSSOM_THRESHOLD, frame=frame
+        )
+        candidates: list[BlossomCandidate] = []
+        for tpl_name, rects in found.items():
+            btype = name_to_type.get(tpl_name, "revelation")
+            for r in rects:
+                candidates.append(
+                    BlossomCandidate(
+                        screen_x=r.cx,
+                        screen_y=r.cy,
+                        blossom_type=btype,
+                        score=r.score,
+                    )
+                )
+        candidates.sort(
+            key=lambda c: math.hypot(c.screen_x - _MAP_CENTER_X, c.screen_y - _MAP_CENTER_Y)
+        )
+        return candidates
+
+    # ── 坐标转换 ──
+
+    @staticmethod
+    def screen_to_game(
+        screen_x: float,
+        screen_y: float,
+        viewport_center: tuple[float, float],
+        zoom_level: float,
+    ) -> tuple[float, float]:
+        """大地图屏幕坐标（1080p buffer）→ 游戏坐标。
+
+        利用视口中心游戏坐标 + 屏幕偏移反算。
+        原神大地图固定北朝上，屏幕方向=标准地图方向：
+        - 屏幕右=东 → 西轴减小（东=-西）
+        - 屏幕下=南 → 北轴减小（南=-北）
+
+        从 drag_map() 的公式 screen_px = _MAP_SCALE_FACTOR * game_delta / zoom 反推：
+        - 北向偏移 = (_MAP_CENTER_Y - screen_y) * zoom / _MAP_SCALE_FACTOR  (屏幕上=北)
+        - 西向偏移 = (_MAP_CENTER_X - screen_x) * zoom / _MAP_SCALE_FACTOR  (屏幕左=西)
+
+        Args:
+            screen_x: 屏幕 X（1080p buffer 坐标）
+            screen_y: 屏幕 Y（1080p buffer 坐标）
+            viewport_center: SIFT 定位的视口中心游戏坐标 (北, 西)
+            zoom_level: 当前缩放等级
+
+        Returns:
+            游戏坐标 (北, 西)，与 TpPosition.x/y 一致
+        """
+        if zoom_level <= 0:
+            zoom_level = 1.0
+        north_delta = (_MAP_CENTER_Y - screen_y) * zoom_level / _MAP_SCALE_FACTOR
+        west_delta = (_MAP_CENTER_X - screen_x) * zoom_level / _MAP_SCALE_FACTOR
+        return (viewport_center[0] + north_delta, viewport_center[1] + west_delta)
+
+
+# 模块级常量导出（供 tp.py / high_level_api.py 复用）
 DISPLAY_TP_ZOOM = _DISPLAY_TP_ZOOM
+MAP_SCALE_FACTOR = _MAP_SCALE_FACTOR
 MAP_CENTER_X = _MAP_CENTER_X
 MAP_CENTER_Y = _MAP_CENTER_Y
