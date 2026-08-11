@@ -124,26 +124,38 @@ class TestAutoBoss:
 
 class TestAutoLeyLine:
     def test_happy_path(self, monkeypatch):
-        """按 region 挑到路径，完整一轮正常返回。"""
-        pe = MagicMock()
-        monkeypatch.setattr(
-            "abilities.navigation.path_executor.PathExecutor", lambda ctx, g: pe
-        )
+        """v2：动态找花 → 传送 → 战斗 → 领奖 一轮正常返回。"""
         monkeypatch.setattr("abilities.reward.claim_resin_reward", _claim_true)
         g = _g()
+        nearest_tp = MagicMock()
+        nearest_tp.name = "七天神像-风"
+        g.find_blossom_and_nearest_tp.return_value = {
+            "blossom_type": "revelation",
+            "blossom_pos": (2284.5, -900.3),
+            "nearest_tp": nearest_tp,
+            "screen_pos": (500, 500),
+        }
+        ctx = MagicMock()
+        ctx.observe = MagicMock()
 
-        result = auto_ley_line_main(MagicMock(), g, region="蒙德", count=1)
+        result = auto_ley_line_main(ctx, g, region="蒙德", count=1)
 
-        assert result["region"] == "蒙德"
         assert result["count"] == 1
-        pe.execute.assert_called_once()
+        assert result["flower_type"] == "revelation"
+        assert result["last_nearest_tp"] == "七天神像-风"
+        g.find_blossom_and_nearest_tp.assert_called_once()
+        g.teleport_to.assert_called_once_with("七天神像-风")
+        g.go_to.assert_called_once()
         g.fight_until_clear.assert_called_once()
 
-    def test_missing_region_raises_task_error(self, monkeypatch):
-        """region 无匹配路径 → TaskError。"""
+    def test_no_blossom_raises_task_error(self, monkeypatch):
+        """v2：首次找花失败（地图无花）→ TaskError。"""
         g = _g()
+        g.find_blossom_and_nearest_tp.return_value = None
+        ctx = MagicMock()
+        ctx.observe = MagicMock()
         with pytest.raises(TaskError):
-            auto_ley_line_main(MagicMock(), g, region="不存在地区", count=1)
+            auto_ley_line_main(ctx, g, region="蒙德", count=1)
 
 
 # ── 注册表可发现（L3 插件契约：AI 按名调用）──

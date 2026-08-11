@@ -1,18 +1,23 @@
-"""auto_ley_line —— 自动刷地脉之花（启示之花 / 藏金之花，Phase D 骨架）。
+"""auto_ley_line —— 自动刷地脉之花（启示之花 / 藏金之花）。
 
-对照 BGI ``AutoLeyLineOutcropTask`` 的**大幅简化**（不做大图图标/冒险之证定位，
-直接按 region 挑一条既有路径走）：
+**v2 流程（动态找花）**：
 
-1. 按 region 挑地脉路径（``resources/paths/ley_line/{region}*.json`` 第一条）
-2. 循环 count 次：
-   a. ``PathExecutor`` 到地脉花附近
-   b. 等花交互提示 → 按 F 激活地脉花
-   c. ``fight_until_clear`` 战斗到清场
-   d. 再等花交互提示 → 按 F → ``claim_resin_reward``；耗尽 → ``NormalEnd``
+1. ``press M`` 开地图 → ``find_blossom_and_nearest_tp`` 在大图上识别地脉花图标
+   并返回花位置 + 最近传送点
+2. ``teleport_to(nearest_tp.name)`` 传送到花附近（tp 内部自动开关地图）
+3. ``go_to(blossom_pos)`` 走到花
+4. 循环 count 次（每次重新找花，花被领奖后消失）：
+   a. 等花交互提示 → 按 F 激活地脉花
+   b. ``fight_until_clear`` 战斗到清场
+   c. 再等花交互提示 → 按 F → ``claim_resin_reward``；耗尽 → ``NormalEnd``
 
-⚠️ 骨架边界：① 位置追踪未就绪，PathExecutor 只能传送到附近（同 auto_boss）；②
-  按 region 挑**第一条**路径 = 固定刷一个点位，BGI 的"大图找花+就近分支"未做；
-  ③ ``flower_type`` 目前仅记录，不参与路径筛选。实机后按需补。
+**对照 BGI ``AutoLeyLineOutcropTask``**：v1 走固定路径文件（``蒙德1-风起地-1.json``
+等）不适合地脉花每日位置变化；v2 用 ``find_blossom_and_nearest_tp`` 动态识别花
+位置 + 选最近传送点，等价于 BGI 的 ``LocateLeyLineOutcrop`` + ``GetNearestGpp``
+组合（简化版）。
+
+⚠️ v2 实机边界：① ``flower_type`` 仅记录不参与筛选（find_blossom 内部会过滤）；
+② 找不到花立即 ``NormalEnd``（count=0 模式）或 ``TaskError``（指定次数）。
 """
 
 from __future__ import annotations
@@ -24,84 +29,158 @@ from framework.resources import res
 
 @task(
     name="auto_ley_line",
-    desc="自动刷地脉之花（启示/藏金）：走路径→激活花→战斗→领奖→循环。region 指定地区前缀。",
+    desc="自动刷地脉之花（启示/藏金）：动态找花→传送→战斗→领奖→循环。region 保留兼容旧参数（v2 用 find_blossom 自动定位）。",
     daemons=["frame", "scene_estimator", "auto_eat"],
     requires=["navigation", "fighter"],
     params={
         "region": {
             "type": "str",
             "default": "蒙德",
-            "desc": "地区前缀（匹配 resources/paths/ley_line/{region}*.json）",
+            "desc": "保留兼容旧参数（v2 动态找花不再依赖路径文件）。地图找花失败时回退用 region 路径",
         },
         "flower_type": {
             "type": "str",
-            "default": "启示之花",
-            "desc": "地脉花类型（启示之花/藏金之花；暂仅记录不参与筛选）",
+            "default": "",
+            "desc": "地脉花类型筛选：''=不限，'revelation'=启示之花，'wealth'=藏金之花",
         },
         "count": {
             "type": "int",
             "default": 4,
-            "desc": "刷取次数（0=直到树脂耗尽）",
+            "desc": "刷取次数（0=直到树脂耗尽或地图无花）",
         },
     },
     tags=["p1", "combat"],
 )
-def main(ctx, g, region: str = "蒙德", flower_type: str = "启示之花", count: int = 4) -> dict:
-    """地脉之花刷取主流程。返回 ``{region, flower_type, count}``。"""
+def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) -> dict:
+    """地脉之花刷取主流程（v2：动态找花）。
+
+    返回 ``{flower_type, count, last_nearest_tp}``。
+    """
     from abilities.game_state import has_flower_f_icon
-    from abilities.navigation.path_executor import PathExecutor, load_path_task
     from abilities.reward import claim_resin_reward
     from avc._core import KeyCode
+    from framework.scene import Scene
 
     ob = ctx.observe
-    # 1. 按 region 挑路径
-    path_dir = res.path_json("ley_line")
-    candidates = sorted(path_dir.glob(f"{region}*.json")) if path_dir.exists() else []
-    if not candidates:
-        raise TaskError(
-            f"未找到 {region} 的地脉路径（需 resources/paths/ley_line/{region}*.json）"
-        )
-    pt = load_path_task(candidates[0])
-    pe = PathExecutor(ctx, g)
-
     done = 0
+    last_info: dict | None = None
+
     while count == 0 or done < count:
         itr = done + 1
-        # 2. 到地脉花附近
-        pe.execute(pt)
-        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
-                 step="navigate", iter=itr, path=candidates[0].name, ok=True)
-        # 3. 激活地脉花
+        # 1. 动态找花（每次循环都重新找，花被领奖后消失）
+        info = _find_blossom(ctx, g, flower_type=flower_type, iter=itr)
+        if info is None:
+            if done == 0:
+                raise TaskError(f"地图上未检测到地脉花（flower_type={flower_type!r}）")
+            raise NormalEnd(f"地图上无更多地脉花，已完成 {done} 次")
+        last_info = info
+        ob.event(
+            "auto_ley_line.step", ability="auto_ley_line", phase="observe",
+            step="find_blossom", iter=itr, ok=True,
+            blossom_type=info["blossom_type"],
+            blossom_pos=tuple(round(v) for v in info["blossom_pos"]),
+            nearest_tp=info["nearest_tp"].name,
+            evidence=ob.save_evidence(ctx, f"find_blossom_iter{itr}"),
+        )
+
+        # 2. 传送到最近点（teleport_to 内部自动开关地图）
+        g.teleport_to(info["nearest_tp"].name)
+        ob.event(
+            "auto_ley_line.step", ability="auto_ley_line", phase="act",
+            step="teleport", iter=itr, ok=True, target=info["nearest_tp"].name,
+            evidence=ob.save_evidence(ctx, f"teleport_landed_iter{itr}"),
+        )
+
+        # 3. 走到花（容差大一点，花本身有 F 交互范围）
+        g.go_to(info["blossom_pos"], tolerance=8.0, timeout=120.0)
+        ob.event(
+            "auto_ley_line.step", ability="auto_ley_line", phase="act",
+            step="go_to_blossom", iter=itr, ok=True,
+            evidence=ob.save_evidence(ctx, f"arrived_blossom_iter{itr}"),
+        )
+
+        # 4. 激活地脉花
         if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=60):
-            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="observe",
-                     step="flower_wait", iter=itr, ok=False, reason="no_flower_icon")
-            raise TaskError(f"未检测到地脉花交互提示: {candidates[0].name}")
+            ob.event(
+                "auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                step="flower_wait", iter=itr, ok=False, reason="no_flower_icon",
+            )
+            raise TaskError(f"未检测到地脉花交互提示（iter={itr}）")
         g.press(KeyCode.f)
-        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
-                 step="activate", iter=itr, ok=True)
-        # 4. 战斗到清场
+        ob.event(
+            "auto_ley_line.step", ability="auto_ley_line", phase="act",
+            step="activate", iter=itr, ok=True,
+        )
+
+        # 5. 战斗到清场
         if not g.fight_until_clear(timeout=180):
-            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
-                     step="fight", iter=itr, ok=False, reason="timeout")
-            raise TaskError("地脉战斗超时未清场")
-        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
-                 step="fight", iter=itr, ok=True)
-        # 5. 领奖：等花交互提示 → 按 F → 树脂领取
+            ob.event(
+                "auto_ley_line.step", ability="auto_ley_line", phase="act",
+                step="fight", iter=itr, ok=False, reason="timeout",
+            )
+            raise TaskError(f"地脉战斗超时未清场（iter={itr}）")
+        ob.event(
+            "auto_ley_line.step", ability="auto_ley_line", phase="act",
+            step="fight", iter=itr, ok=True,
+            evidence=ob.save_evidence(ctx, f"fight_cleared_iter{itr}"),
+        )
+
+        # 6. 领奖：等花交互提示 → 按 F → 树脂领取
         if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=20):
-            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="observe",
-                     step="reward_icon_wait", iter=itr, ok=False, reason="no_reward_icon")
-            raise TaskError("未检测到地脉花领奖交互提示")
+            ob.event(
+                "auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                step="reward_icon_wait", iter=itr, ok=False, reason="no_reward_icon",
+            )
+            raise TaskError(f"未检测到地脉花领奖交互提示（iter={itr}）")
         g.press(KeyCode.f)
         if not g.wait_until(lambda: g.find_text("原粹树脂") is not None, timeout=15):
-            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="observe",
-                     step="reward_dialog_wait", iter=itr, ok=False, reason="no_reward_dialog")
-            raise TaskError("未出现树脂奖励对话框")
+            ob.event(
+                "auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                step="reward_dialog_wait", iter=itr, ok=False, reason="no_reward_dialog",
+            )
+            raise TaskError(f"未出现树脂奖励对话框（iter={itr}）")
+        ob.save_evidence(ctx, f"reward_dialog_iter{itr}")  # 领奖对话框快照（无事件，纯存档）
         ok = claim_resin_reward(ctx, g)
-        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
-                 step="claim", iter=itr, ok=ok, exhausted=not ok)
+        ob.event(
+            "auto_ley_line.step", ability="auto_ley_line", phase="act",
+            step="claim", iter=itr, ok=ok, exhausted=not ok,
+        )
         done += 1
         if not ok:
             raise NormalEnd(f"树脂耗尽，已完成 {done} 次地脉")
         g.wait_main_ui(timeout=30)
 
-    return {"region": region, "flower_type": flower_type, "count": done}
+    return {
+        "flower_type": last_info["blossom_type"] if last_info else flower_type,
+        "count": done,
+        "last_nearest_tp": last_info["nearest_tp"].name if last_info else None,
+    }
+
+
+# ── 内部：找花（开图 → find_blossom → 关图）──
+
+
+def _find_blossom(ctx, g, *, flower_type: str = "", iter: int = 0) -> dict | None:
+    """开地图找花，返回 ``find_blossom_and_nearest_tp`` 结果或 None。负责开/关地图。
+
+    ``find_blossom_and_nearest_tp`` 要求在 MAP scene 调用（high_level_api.py:273 docstring）。
+    调完关闭地图回到 MAIN_UI，让后续 ``teleport_to``（内部自己开图）从干净状态开始。
+    """
+    from avc._core import KeyCode
+    from framework.scene import Scene
+
+    # 开地图（若已在 MAP 则跳过）
+    if g.scene is None or g.scene.scene is not Scene.MAP:
+        ctx.release_all_keys()
+        g.press(KeyCode.m)
+        if not g.wait_scene(Scene.MAP, timeout=8.0):
+            return None  # 开图失败，让上层判断
+
+    try:
+        info = g.find_blossom_and_nearest_tp(flower_type=flower_type)
+    finally:
+        # 不管找没找到，都关地图回 MAIN_UI（teleport_to 自己会再开图）
+        ctx.release_all_keys()
+        g.press(KeyCode.m)
+        g.wait_main_ui(timeout=5.0)
+    return info
