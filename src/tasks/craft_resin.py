@@ -29,6 +29,8 @@ def main(ctx, g, country: str = "蒙德") -> dict:
     from abilities.craft import craft_condensed_resin
 
     ok = craft_condensed_resin(ctx, g, country=country)
+    ctx.observe.event("craft.resin", ability="craft_resin", phase="act",
+                      step="craft", country=country, ok=ok)
     if not ok:
         raise TaskError(f"合成浓缩树脂失败（路径或进入失败）: {country}")
     return {"crafted": True, "country": country}

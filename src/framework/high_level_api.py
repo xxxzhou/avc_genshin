@@ -78,6 +78,20 @@ class HighLevelApi:
         if self.runtime._observe is not None:
             self.runtime._observe.event(kind, **fields)
 
+    @property
+    def observe(self):
+        """结构化观测句柄（``设计实现.md §4.4``），与 ``ctx.observe`` 同源。
+
+        永可调用、永不返回 None：活跃 run 内返真 ``Observe``，否则 ``_NullObserve``。
+        ability 取 ``self.g.observe`` 或 ``self.ctx.observe`` 均可。**保留** ``_observe``
+        的 None-guard（处理 teardown 竞态：runtime.py 置 ``_observe=None`` 早于守护取消）。
+        """
+        from framework.observe import _NULL
+
+        if self.runtime._observe is not None:
+            return self.runtime._observe
+        return _NULL
+
     # ── 纯读（inline，读 SharedState；GIL 下引用/字典成员读写原子）──
 
     @property
@@ -211,12 +225,12 @@ class HighLevelApi:
     def wait_text(self, kw: str, timeout: float = 10.0) -> bool:
         from abilities import vision_utils as vu
 
-        return self.wait_until(lambda: vu.find_text(self.ctx, kw) is not None, timeout=timeout)
+        return self.wait_until(lambda: vu.find_text(self.ctx, kw, _quiet=True) is not None, timeout=timeout)
 
     def wait_template(self, path: str, timeout: float = 10.0, threshold: float = 0.8) -> bool:
         from abilities import vision_utils as vu
 
-        return self.wait_until(lambda: vu.find_template(self.ctx, path, threshold) is not None, timeout=timeout)
+        return self.wait_until(lambda: vu.find_template(self.ctx, path, threshold, _quiet=True) is not None, timeout=timeout)
 
     # ── 即时检测（桥接）──
 

@@ -34,6 +34,11 @@ class MockContext:
     def ensure_foreground(self, wait_s=0.0):
         return True
 
+    @property
+    def observe(self):
+        from framework.observe import _NULL
+        return _NULL
+
 
 def _make_mock_ctx():
     return MockContext()
@@ -1294,6 +1299,12 @@ class _MockCtx:
     def save_debug(self, path):
         pass
 
+    @property
+    def observe(self):
+        from framework.observe import _NULL
+
+        return _NULL
+
 
 class TestTpPanelDetect:
     """detect_tp_panel：OCR 分类 传送/标记/无。"""
@@ -1410,7 +1421,8 @@ class TestTeleportConfirmFlow:
             "abilities.tp_panel.find_teleport_button",
             lambda *a, **k: self._rect(1600, 1000),
         )
-        assert tp._wait_and_confirm_teleport() is True
+        confirmed, kind, pin = tp._wait_and_confirm_teleport()
+        assert confirmed is True
         g.click.assert_called_once_with(1600, 1000)
 
     def test_confirm_teleport_presses_f_when_button_text_missing(self, monkeypatch):
@@ -1427,7 +1439,8 @@ class TestTeleportConfirmFlow:
         monkeypatch.setattr(
             "abilities.tp_panel.find_teleport_button", lambda *a, **k: None
         )
-        assert tp._wait_and_confirm_teleport() is True
+        confirmed, kind, pin = tp._wait_and_confirm_teleport()
+        assert confirmed is True
         assert any(k == KeyCode.f for k, _ in ctx._press_log)
 
     def test_confirm_marker_closes_and_returns_false(self, monkeypatch):
@@ -1444,7 +1457,9 @@ class TestTeleportConfirmFlow:
             "abilities.tp_panel.close_marker_panel",
             lambda *a, **k: closed.append(1),
         )
-        assert tp._wait_and_confirm_teleport() is False
+        confirmed, kind, pin = tp._wait_and_confirm_teleport()
+        assert confirmed is False
+        assert pin is True  # 命中标记面板 → 被自定义标记覆盖
         assert len(closed) == 1  # 标记面板已关闭
         g.click.assert_not_called()  # 不点任何按钮（确认按钮会误改标记）
 
@@ -1458,7 +1473,8 @@ class TestTeleportConfirmFlow:
             lambda *a, **k: TeleportPanelKind.NONE,
         )
         monkeypatch.setattr("abilities.navigation.tp._CONFIRM_WAIT_TIMEOUT", 0.0)
-        assert tp._wait_and_confirm_teleport() is False
+        confirmed, kind, pin = tp._wait_and_confirm_teleport()
+        assert confirmed is False
         g.click.assert_not_called()
 
     def test_click_and_confirm_retries_next_candidate_on_marker(self, monkeypatch):

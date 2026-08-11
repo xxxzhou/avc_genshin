@@ -46,22 +46,34 @@ def main(ctx, g, domain_name: str, count: int = 5) -> dict:
         get_domain_coords,
     )
 
+    ob = ctx.observe
     # 检查秘境坐标是否存在
     if get_domain_coords(domain_name) is None:
         raise TaskError(f"未找到秘境坐标: {domain_name}（tp.json 无此秘境，且无别名）")
 
     done = 0
     while count == 0 or done < count:
+        itr = done + 1
         # 1. 进入秘境
         if not enter_domain(ctx, g, domain_name):
+            ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                     step="enter", iter=itr, ok=False, reason="enter_failed")
             raise TaskError(f"进入秘境失败: {domain_name}")
+        ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                 step="enter", iter=itr, ok=True)
 
         # 2. 战斗到清场
         if not fight_domain_safe(ctx, g, timeout=300):
+            ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                     step="fight", iter=itr, ok=False, reason="timeout")
             raise TaskError(f"秘境战斗超时未清场: {domain_name}")
+        ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                 step="fight", iter=itr, ok=True)
 
         # 3. 领奖
         ok = claim_domain_reward(ctx, g)
+        ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                 step="claim", iter=itr, ok=ok, exhausted=not ok)
         done += 1
         if not ok:
             # 树脂耗尽 → 退出后正常结束
@@ -70,7 +82,11 @@ def main(ctx, g, domain_name: str, count: int = 5) -> dict:
 
         # 4. 退出秘境（下一轮会重新进入）
         if not exit_domain(ctx, g):
+            ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                     step="exit", iter=itr, ok=False, reason="exit_failed")
             raise TaskError("退出秘境失败")
+        ob.event("auto_domain.step", ability="auto_domain", phase="act",
+                 step="exit", iter=itr, ok=True)
 
     return {"domain": domain_name, "count": done}
 

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import math
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -241,12 +240,38 @@ class Teleporter:
         name_or_pos: str | tuple[float, float],
         map_name: str,
     ) -> TpPosition | None:
-        """解析传送目标。"""
+        """解析传送目标。
+
+        可观测性：发 ``tp.resolve``（ability=tp, phase=decide, target, candidates, selected, ok）。
+        痛点①「传送点选远」：坐标输入时展示 DB 最近 N 候选(name/type/距离)+选中谁，
+        AI 据此判定是否选了过远的点（如地脉花最近传送点应为最近候选）。
+        """
         if isinstance(name_or_pos, str):
-            return self._db.find_by_name(name_or_pos, map_name)
+            target = self._db.find_by_name(name_or_pos, map_name)
+            self.ctx.observe.event(
+                "tp.resolve", ability="tp", phase="decide",
+                target=str(name_or_pos), map=map_name,
+                selected=target.name if target else None,
+                ok=target is not None,
+                reason=None if target else "name_not_found",
+            )
+            return target
         x, y = name_or_pos
-        nearest = self._db.find_nearest(x, y, map_name, n=1)
-        return nearest[0] if nearest else None
+        candidates = self._db.find_nearest(x, y, map_name, n=3)
+        target = candidates[0] if candidates else None
+        self.ctx.observe.event(
+            "tp.resolve", ability="tp", phase="decide",
+            target=f"({x:.0f},{y:.0f})", map=map_name,
+            candidates=[
+                {"name": c.name, "type": c.type,
+                 "dist": round(math.hypot(c.x - x, c.y - y))}
+                for c in candidates
+            ],
+            selected=target.name if target else None,
+            ok=target is not None,
+            reason=None if target else "no_nearest",
+        )
+        return target
 
     def _open_map(self) -> None:
         """打开地图界面（按 M 键）。"""
@@ -300,18 +325,20 @@ class Teleporter:
         from abilities.navigation.map_ops import DISPLAY_TP_ZOOM, MapController
         from framework.scene import Scene
 
+        ob = self.ctx.observe
         if self.g.scene is None or self.g.scene.scene is not Scene.MAP:
-            print(f"[tp] 不在 MAP 场景，跳过导航（scene={self.g.scene}）", file=sys.stderr)
+            ob.event("tp.navigate", ability="tp", phase="decide", ok=False,
+                     reason="not_in_map", scene=str(self.g.scene))
             return
 
         mc = MapController(self.ctx, self.g)
         frame = self.ctx.capture()
         z0 = mc.measure_zoom_level(frame)
-        print(f"[tp] 初始 zoom={z0}", file=sys.stderr)
 
         # 1. 切地面层（传送入口默认走地面）
         grounded = mc.switch_to_ground_layer(frame)
-        print(f"[tp] switch_to_ground_layer={grounded}", file=sys.stderr)
+        ob.event("tp.navigate", ability="tp", phase="observe",
+                 zoom=z0, grounded=grounded, throttle_key="tp.navigate:init")
         frame = self.ctx.capture()
 
         # 2. 切国家 tab（v1 禁用：实机确认 (1760,1020) 按钮本版本点不开国家列表，
@@ -319,7 +346,6 @@ class Teleporter:
         #    留 v2：换按钮位置 + OCR ReplaceDictionary（蒙德→蒙徳）。）
         # if target.country:
         #     ok = mc.switch_country(target.country, frame)
-        #     print(f"[tp] switch_country({target.country})={ok}", file=sys.stderr)
         #     frame = self.ctx.capture()
 
         # 3. MoveMapToCore 循环：SIFT 定位视口 → 算偏移 → 拖拽 → 重定位
@@ -332,9 +358,14 @@ class Teleporter:
             center = self._big_map_position(last_center)
             if center is None:
                 fail_streak += 1
-                print(f"[tp] iter{i} SIFT 定位失败（fail_streak={fail_streak}）", file=sys.stderr)
+                ob.event("tp.navigate", ability="tp", phase="observe", iter=i,
+                         ok=False, reason="sift_fail", fail_streak=fail_streak,
+                         throttle_key="tp.navigate:sift")
                 if fail_streak >= _MAX_NAV_FAILS:
                     if reset_count >= _MAP_RESET_LIMIT:
+                        ob.event("tp.navigate", ability="tp", phase="decide",
+                                 ok=False, reason="nav_abort",
+                                 reset_count=reset_count, target=target.name)
                         raise RuntimeError(
                             f"大图视口连续 {fail_streak} 次 SIFT 定位失败"
                             f"且复位 {reset_count} 次仍无法导航到 {target.name}"
@@ -342,10 +373,9 @@ class Teleporter:
                     reset_count += 1
                     fail_streak = 0
                     last_center = None
-                    print(
-                        f"[tp] SIFT 连续失败，M 关/开图复位（第 {reset_count}/{_MAP_RESET_LIMIT} 次）",
-                        file=sys.stderr,
-                    )
+                    ob.event("tp.navigate", ability="tp", phase="act",
+                             reason="map_reset", reset_count=reset_count,
+                             throttle_key="tp.navigate:reset")
                     self._reset_map_view()
                     frame = self.ctx.capture()
                     continue
@@ -358,11 +388,11 @@ class Teleporter:
             dx = target.x - center[0]
             dy = target.y - center[1]
             dist = math.hypot(dx, dy)
-            print(
-                f"[tp] iter{i} center=({center[0]:.0f},{center[1]:.0f}) "
-                f"target=({target.x:.0f},{target.y:.0f}) dx={dx:.0f} dy={dy:.0f} dist={dist:.0f}",
-                file=sys.stderr,
-            )
+            ob.event("tp.navigate", ability="tp", phase="observe", iter=i,
+                     center=(round(center[0]), round(center[1])),
+                     target=(round(target.x), round(target.y)),
+                     dist=round(dist), ok=dist < _MOVE_TOLERANCE,
+                     throttle_key="tp.navigate:iter")
             if dist < _MOVE_TOLERANCE:
                 break  # 目标进入容差 → 去点图标
 
@@ -384,10 +414,13 @@ class Teleporter:
         # 5. 匹配目标 type 图标，返回候选点击点；未命中兜底视口中心（最后一次定位处）
         icons = mc.find_tp_icons(target.type, frame)
         if icons:
-            for ic in icons:
-                print(f"[tp] 命中 {target.type} 图标 @({ic.cx:.0f},{ic.cy:.0f})", file=sys.stderr)
+            ob.event("tp.navigate", ability="tp", phase="decide", icon_type=target.type,
+                     icons=len(icons), ok=True, fallback=False,
+                     hit_pos=[(round(ic.cx), round(ic.cy)) for ic in icons[:4]])
             return icons
-        print(f"[tp] 未命中 {target.type} 图标，兜底点视口中心", file=sys.stderr)
+        # 痛点①直接证据：未命中任何传送点图标 → 兜底点视口中心（可能选远/选错）
+        ob.event("tp.navigate", ability="tp", phase="decide", icon_type=target.type,
+                 icons=0, ok=False, reason="icon_miss_fallback_center", fallback=True)
         return [self._center_rect()]
 
     @staticmethod
@@ -405,28 +438,36 @@ class Teleporter:
         - 点击命中自定义标记 → 打开标记面板（OCR '追踪'/'总标记' 等）→ Esc 关闭，
           换下一个候选图标重试（避 pin：优先点无标记覆盖的锚点）
         - 无面板 → 短等后换下一候选
+
+        可观测性：每候选发 ``tp.confirm``（ability=tp, phase=act, click, panel, pin_covered, ok）。
+        痛点①：panel=MARKER/pin_covered=True 说明被自定义标记拦截（避 pin 是否生效）。
         """
+        ob = self.ctx.observe
         if not candidates:
             candidates = [self._center_rect()]
         for icon in candidates[:_TELEPORT_RETRY_COUNT]:
-            print(f"[tp] 点击候选图标 @({icon.cx:.0f},{icon.cy:.0f})", file=sys.stderr)
             self.g.click(icon.cx, icon.cy)
             try:
                 self.ctx.save_debug("debug/after_icon_click.png")  # 存帧看点击后画面
             except Exception:
                 pass
-            if self._wait_and_confirm_teleport():
+            confirmed, kind_name, pin_covered = self._wait_and_confirm_teleport()
+            ob.event("tp.confirm", ability="tp", phase="act",
+                     click=(round(icon.cx), round(icon.cy)),
+                     panel=kind_name, pin_covered=pin_covered, ok=confirmed,
+                     reason="pin_blocking" if pin_covered and not confirmed else None)
+            if confirmed:
                 return
-        print("[tp] 所有候选图标均未确认传送面板", file=sys.stderr)
+        ob.event("tp.confirm", ability="tp", phase="decide", ok=False,
+                 reason="no_panel_all_candidates")
 
-    def _wait_and_confirm_teleport(self) -> bool:
+    def _wait_and_confirm_teleport(self) -> tuple[bool, str, bool]:
         """等待传送确认面板出现并确认（OCR 面板检测，兜底）。
 
         quick_teleport 守护（Scene.MAP 下活跃）是主确认路径；本方法在守护未挂载时兜底。
         对照 BGI TpTask.HandleTeleportPanel（2417-2442）：检测到传送按钮后点击/按 F 确认。
 
-        返回 True 表示已确认传送；False 表示未确认（标记面板已关闭 / 超时），
-        调用方应换下一个候选图标重试。
+        返回 ``(是否已确认传送, 面板类型名, 是否被 pin 覆盖)``；未确认时调用方换下一候选重试。
         """
         import time
 
@@ -440,10 +481,11 @@ class Teleporter:
         )
 
         deadline = time.time() + _CONFIRM_WAIT_TIMEOUT
+        last_kind = "NONE"
         while time.time() < deadline:
             frame = self.ctx.capture()
             kind = detect_tp_panel(self.ctx, frame)
-            print(f"[tp] confirm: panel={kind.name}", file=sys.stderr)
+            last_kind = kind.name
             if kind is TeleportPanelKind.TELEPORT:
                 try:
                     self.ctx.save_debug("debug/go_teleport_detected.png")  # 存帧诊断面板实际状态
@@ -451,22 +493,17 @@ class Teleporter:
                     pass
                 btn = find_teleport_button(self.ctx, frame)
                 if btn is not None:
-                    print(f"[tp] 点击传送按钮 @({btn.cx:.0f},{btn.cy:.0f})", file=sys.stderr)
                     self.g.click(btn.cx, btn.cy)
                 else:
                     # OCR 未定位到按钮文字，按 F 兜底（BGI HandleTeleportPanel 按 F）
-                    print("[tp] 传送面板已检测到但按钮文字未命中，按 F 确认", file=sys.stderr)
                     self.ctx.press(KeyCode.f)
-                return True
+                return True, kind.name, False
             if kind is TeleportPanelKind.MARKER:
-                print(
-                    "[tp] 命中标记面板（自定义标记覆盖传送点），Esc 关闭后返回 False 重试",
-                    file=sys.stderr,
-                )
+                # 命中标记面板（自定义标记覆盖传送点），Esc 关闭后换下一候选重试
                 close_marker_panel(self.ctx)
-                return False
+                return False, kind.name, True
             utils.sleep(0.3)
-        return False
+        return False, last_kind, False
 
     def _big_map_position(
         self, expected: tuple[float, float] | None = None

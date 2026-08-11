@@ -262,6 +262,8 @@ class PositionGetter:
             return None
 
         try:
+            mode = "local" if expected_center is not None else "full"
+            fallback_used = False
             if expected_center is not None:
                 rx, ry, rw, rh = self._build_search_rect(
                     expected_center, viewport.width, viewport.height
@@ -271,20 +273,36 @@ class PositionGetter:
                 # → 兜底全图匹配，避免连续失败触发 M 复位
                 if hit <= 0:
                     hit = fm.matchQueryFull(viewport)
+                    fallback_used = True
+                    mode = "full(fallback)"
             else:
                 hit = fm.matchQueryFull(viewport)
             if hit <= 0:
+                self.ctx.observe.event("pos.bigmap", ability="pos", phase="observe",
+                                       mode=mode, hit=0, ok=False, reason="sift_no_match",
+                                       throttle_key="pos.bigmap")
                 return None
             r = fm.getMatch(0)
             if r is None:
+                self.ctx.observe.event("pos.bigmap", ability="pos", phase="observe",
+                                       mode=mode, hit=hit, ok=False, reason="no_result",
+                                       throttle_key="pos.bigmap")
                 return None
             # 点结果：r.x/y = 视口中心在 256 底图的坐标（w=h=0 哨兵）
             cx256 = float(r.x)
             cy256 = float(r.y)
-        except Exception:
+        except Exception as e:
+            self.ctx.observe.event("pos.bigmap", ability="pos", phase="observe",
+                                   ok=False, reason="exception", detail=repr(e),
+                                   throttle_key="pos.bigmap")
             return None
 
-        return self._map256_to_game(cx256, cy256)
+        game = self._map256_to_game(cx256, cy256)
+        self.ctx.observe.event("pos.bigmap", ability="pos", phase="observe",
+                               mode=mode, fallback_used=fallback_used, hit=hit,
+                               pos=(round(game[0]), round(game[1])), ok=True,
+                               throttle_key="pos.bigmap")
+        return game
 
     def _ensure_feature_matcher(self):
         """懒加载 avc IFeatureMatcher（大图 SIFT 重定位）。失败返回 None。
@@ -401,6 +419,8 @@ class PositionGetter:
         # 4. 多图层匹配
         has_prev = self._has_prev
         best_result = None  # (game_x, game_y, layer_idx)
+        sel_score = 0.0
+        candidate_scores: list[float] = []  # 全局模式下各层候选分数（诊断层歧义用）
 
         if has_prev:
             # 局部匹配：先搜覆盖 prev_position 的层（local 模式），再搜其他层（global 模式）
@@ -419,6 +439,7 @@ class PositionGetter:
                 if result is not None:
                     gx, gy, score = result
                     best_result = (gx, gy, idx)
+                    sel_score = score
                     break
 
         if best_result is None:
@@ -430,6 +451,7 @@ class PositionGetter:
                     gx, gy, score = result
                     candidates.append((gx, gy, idx, score))
 
+            candidate_scores = [c[3] for c in candidates]
             if candidates:
                 # 按 score 降序
                 candidates.sort(key=lambda c: c[3], reverse=True)
@@ -440,16 +462,37 @@ class PositionGetter:
                         break
                     if layers[idx].contains(gx, gy):
                         best_result = (gx, gy, idx)
+                        sel_score = score
                         break
                 # 全不在覆盖范围内时回退最高 score
                 if best_result is None:
                     gx, gy, idx, score = candidates[0]
                     best_result = (gx, gy, idx)
+                    sel_score = score
 
+        # 可观测性：pos.match —— 痛点②（纳塔歧义=全局选错层后 _prev_layer_idx 锁死）
         if best_result is not None:
             self._prev_layer_idx = best_result[2]
+            in_cov = layers[best_result[2]].contains(best_result[0], best_result[1])
+            self.ctx.observe.event(
+                "pos.match", ability="pos", phase="decide",
+                has_prev=has_prev, mode=("local" if has_prev else "global"),
+                selected_layer=layers[best_result[2]].layer_id,
+                selected_score=round(sel_score, 3),
+                candidate_count=len(candidate_scores),
+                top_scores=[round(s, 3) for s in sorted(candidate_scores, reverse=True)[:4]],
+                in_coverage=in_cov,
+                pos=(round(best_result[0]), round(best_result[1])),
+                ok=True, throttle_key="pos.match",
+            )
             return (best_result[0], best_result[1])
 
+        self.ctx.observe.event(
+            "pos.match", ability="pos", phase="decide",
+            has_prev=has_prev, mode=("local" if has_prev else "global"),
+            candidate_count=len(candidate_scores),
+            ok=False, reason="no_match", throttle_key="pos.match",
+        )
         return None
 
     def _match_layer(

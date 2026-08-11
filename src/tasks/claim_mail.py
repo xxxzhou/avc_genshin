@@ -20,4 +20,6 @@ def main(ctx, g) -> dict:
     from abilities.mail import claim_all_mail
 
     ok = claim_all_mail(ctx, g)
+    ctx.observe.event("mail.claim", ability="claim_mail", phase="act",
+                      step="claim", ok=ok, claimed=ok)
     return {"claimed": ok}

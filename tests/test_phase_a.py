@@ -110,6 +110,12 @@ class MockContext:
     def ensure_foreground(self, wait_s=0.0):
         return True
 
+    @property
+    def observe(self):
+        """观测句柄 no-op（mock 专注 CV 逻辑，不验证事件）。真实 GameContext 经 runtime 返 Observe。"""
+        from framework.observe import _NULL
+        return _NULL
+
 
 def _make_dctx(ctx=None, scene=None, frame=None, detections=None):
     """创建测试用 DaemonCtx。"""

@@ -160,24 +160,46 @@ class SimpleFighter:
     # ── 敌人检测（战斗态，血条）──
 
     def has_enemy(self) -> bool:
-        """即时截图 + 血条色块检测。"""
+        """即时截图 + 血条色块检测。
+
+        可观测性：发 ``detect.blood``（ability=fighter, count, ok=count>0）。
+        ``throttle_key`` 1/s 窗口——战斗连招每步调（~5Hz），折叠为周期快照；
+        **count=0（ok=False）永不节流**，每次浮现（痛点⑤「怪检测不到」的直接证据）。
+        """
         frame = self.ctx.capture()
         if frame is None:
+            self.ctx.observe.event("detect.blood", ability="fighter", count=0,
+                                   ok=False, reason="no_frame", throttle_key="has_enemy")
             return False
-        return has_enemy_in_frame(frame)
+        count = len(detect_blood_bars(frame))
+        self.ctx.observe.event("detect.blood", ability="fighter", count=count,
+                               ok=count > 0, throttle_key="has_enemy")
+        return count > 0
 
     def find_nearest_enemy(self) -> Rect | None:
-        """最近血条框（按距 _PRE_AIM 的 |dx|+|dy| 排序），无则 None。"""
+        """最近血条框（按距 _PRE_AIM 的 |dx|+|dy| 排序），无则 None。
+
+        可观测性：发 ``detect.blood``（ability=fighter, count, nearest, ok）。
+        痛点⑤发源地——区分「真没怪」(count=0) vs「检不到」（血条色块漏检）。
+        """
         frame = self.ctx.capture()
         if frame is None:
+            self.ctx.observe.event("detect.blood", ability="fighter", count=0,
+                                   ok=False, reason="no_frame", throttle_key="find_enemy")
             return None
         bars = detect_blood_bars(frame)
         if not bars:
+            self.ctx.observe.event("detect.blood", ability="fighter", count=0,
+                                   ok=False, throttle_key="find_enemy")
             return None
         bars.sort(
             key=lambda r: abs(r.cx - _PRE_AIM[0]) + abs(r.cy - _PRE_AIM[1])
         )
-        return bars[0]
+        nearest = bars[0]
+        self.ctx.observe.event("detect.blood", ability="fighter", count=len(bars),
+                               ok=True, nearest=(int(nearest.cx), int(nearest.cy)),
+                               throttle_key="find_enemy")
+        return nearest
 
     def seek_enemy(self, max_turns: int = _SEEK_MAX_TURNS) -> Rect | None:
         """转视角索敌：血条不在屏幕中心时 moveBy 旋转找敌，返回最近血条或 None。
@@ -185,8 +207,11 @@ class SimpleFighter:
         对齐 BGI ``AutoFightSeek``（血条阈值→旋转找敌）；简化：固定步长转，
         不复用 RotaryFactorMapping。水平偏差 > ``_SEEK_ALIGN_TOL`` 才转向血条，
         否则盲转一档继续找。⚠ 旋转方向/步长实机验证。
+
+        可观测性：发 ``fight.enemy``（ability=fighter, turned, ok）——痛点⑤「怪检测不到」：
+        转 max_turns 仍无血条 = 嫌疑（真没怪 / 血条色块漏检，看 detect.blood 配合判定）。
         """
-        for _ in range(max_turns):
+        for attempt in range(max_turns):
             bar = self.find_nearest_enemy()
             if bar is None:
                 self._rotate_camera(_SEEK_TURN_PX)  # 没看到敌 → 转一档
@@ -194,7 +219,11 @@ class SimpleFighter:
             dx = bar.cx - _PRE_AIM[0]
             if abs(dx) > _SEEK_ALIGN_TOL:
                 self._rotate_camera(int(dx * 0.1))  # 血条偏右/左 → 转过去（比例实机调）
+            self.ctx.observe.event("fight.enemy", ability="fighter", detector="blood",
+                                   turned=attempt, ok=True)
             return bar
+        self.ctx.observe.event("fight.enemy", ability="fighter", detector="blood",
+                               turned=max_turns, ok=False, reason="not_found_after_seek")
         return None
 
     def _rotate_camera(self, px: int) -> None:
@@ -210,7 +239,7 @@ class SimpleFighter:
 
     def is_q_ready(self) -> bool:
         """q_classify 分类 Q 图标 ROI：类名含 'energy 1 cd 0' 且非 'cd 1' 且置信度≥0.7。"""
-        name, score = self._classify_crop(self._q_classifier(), _Q_ROI)
+        name, score = self._classify_crop(self._q_classifier(), _Q_ROI, label="q")
         if score < _Q_CONF_THRESH:
             return False
         return _Q_READY_KEYWORD in name and _Q_COOLDOWN_KEYWORD not in name
@@ -226,7 +255,7 @@ class SimpleFighter:
         if idx is None:
             return None
         name, score = self._classify_crop(
-            self._avatar_classifier(), _AVATAR_SIDE_ROIS[idx]
+            self._avatar_classifier(), _AVATAR_SIDE_ROIS[idx], label="avatar"
         )
         if score < _AVATAR_CONF_THRESH:
             return None
@@ -286,35 +315,55 @@ class SimpleFighter:
         frame = self.ctx.capture()
         if frame is not None and has_resurrection_icon(self.ctx, frame):
             self._tap(KeyCode.z, 0.05)
+            # 痛点③：战斗中死亡按 Z 复活（与 recover_on_death 的传送复活是两条路径，都静默→补发）
+            self.ctx.observe.event("survival.revive", ability="fighter",
+                                   resurrection_detected=True, path="combat_z",
+                                   action="press_z", ok=False, reason="dead_in_combat")
             utils.sleep(1.0)
             return
 
-        # 1. 红血检测：读共享状态 + 直接像素兜底
+        # 1. 红血检测：读共享状态 + 直接像素兜底（两路 source 区分）
         low = False
+        source = "shared"
         if self.g.runtime is not None:
             low = self.g.runtime.shared.low_hp
         if not low and frame is not None:
             low = is_low_hp(self.ctx, frame)
+            source = "pixel"
         if not low:
-            return
+            return  # 健康：不发（_check_survival 每步调，避免噪声）
 
         # 2. 红血 + Recovery 可用 → 按 Z 吃药
-        if frame is not None and has_recovery_icon(self.ctx, frame):
+        recovery = frame is not None and has_recovery_icon(self.ctx, frame)
+        if recovery:
             self._tap(KeyCode.z, 0.05)
+            self.ctx.observe.event("survival.check", ability="fighter", low_hp=True,
+                                   source=source, recovery_icon=True, action="eat", ok=True)
             utils.sleep(0.3)
             return
 
         # 3. 无药 → 换人保命（轮询下一槽位，3 秒冷却）
         now = time.monotonic()
         if now - self._last_hp_switch_time < _LOW_HP_SWITCH_COOLDOWN:
+            self.ctx.observe.event("survival.check", ability="fighter", low_hp=True,
+                                   source=source, recovery_icon=False, action="none",
+                                   reason="switch_cooldown", ok=False,
+                                   throttle_key="survival:low_nodrug")
             return
         active = self._active_slot_index()
         if active is None:
+            self.ctx.observe.event("survival.check", ability="fighter", low_hp=True,
+                                   source=source, recovery_icon=False, action="none",
+                                   reason="no_slot_detected", ok=False,
+                                   throttle_key="survival:low_nodrug")
             return
         for slot in range(1, 5):
             if slot - 1 != active:
                 self.switch_character(slot)
                 self._last_hp_switch_time = now
+                self.ctx.observe.event("survival.check", ability="fighter", low_hp=True,
+                                       source=source, recovery_icon=False, action="switch",
+                                       slot=slot, ok=True)
                 return
 
     # ── 切人 ──
@@ -392,6 +441,9 @@ class SimpleFighter:
         对齐 BGI ``Avatar.ThrowWhenDefeated`` → ``TpForRecover``：不点复活按钮，
         直接传七天神像（传送即复活）。战斗循环每轮开头调。优先按当前位置找最近神像，
         位置不可用时回退"七天神像-风"。
+
+        可观测性：发 ``survival.revive``（ability=fighter, goddess_target, teleport_ok, ok）。
+        痛点③「死了没复活」：resurrection 检到但 teleport_ok=False 或女神 None = 嫌疑。
         """
         from abilities.game_state import has_resurrection_icon
         from framework.errors import Retry
@@ -399,11 +451,21 @@ class SimpleFighter:
         frame = self.ctx.capture()
         if frame is None or not has_resurrection_icon(self.ctx, frame):
             return False
+        target = self._find_nearest_goddess()
+        teleport_ok = False
         try:
-            target = self._find_nearest_goddess()
             self.g.teleport_to(target if target is not None else "七天神像-风")
-        except Exception:
-            pass  # 传送失败也重试（可能已在神像旁）
+            teleport_ok = True
+        except Exception as e:
+            self.ctx.observe.event("survival.revive", ability="fighter",
+                                   resurrection_detected=True, path="teleport_goddess",
+                                   goddess_target=target, teleport_ok=False, ok=False,
+                                   reason="teleport_fail", detail=repr(e))
+        if teleport_ok:
+            self.ctx.observe.event("survival.revive", ability="fighter",
+                                   resurrection_detected=True, path="teleport_goddess",
+                                   goddess_target=target, teleport_ok=True, ok=True,
+                                   action="teleport_goddess")
         raise Retry(reason="角色死亡，传送七天神像复活后重试")
 
     def _find_nearest_goddess(self) -> str | None:
@@ -518,17 +580,26 @@ class SimpleFighter:
         """Q 元素爆发：先检 is_q_ready；点按 Q 重试至检测到 CD 或重试耗尽。
 
         没好（is_q_ready=False）直接跳过；释放后等大招动画 1.5s。
+
+        可观测性：发 ``fight.burst``（ability=fighter, q_ready, attempts, ok, reason）——
+        诊断「Q 好了却没放大」(q_not_ready) vs「放了没进 CD」(no_cd_after_retry)。
         """
         from avc._core import KeyCode
 
         if not self.is_q_ready():
+            self.ctx.observe.event("fight.burst", ability="fighter", q_ready=False,
+                                   ok=False, reason="q_not_ready")
             return
-        for _ in range(_BURST_RETRY):
+        for attempt in range(_BURST_RETRY):
             self._tap(KeyCode.q, _SWITCH_SLOT_HOLD)
             utils.sleep(_BURST_SLEEP)
             if not self.is_q_ready():  # 进入 CD → 释放成功
                 utils.sleep(_BURST_ANIM_SLEEP)
+                self.ctx.observe.event("fight.burst", ability="fighter", q_ready=True,
+                                       attempts=attempt + 1, ok=True)
                 return
+        self.ctx.observe.event("fight.burst", ability="fighter", q_ready=True,
+                               attempts=_BURST_RETRY, ok=False, reason="no_cd_after_retry")
 
     # ── 私有：底层输入 helper ──
 
@@ -594,20 +665,30 @@ class SimpleFighter:
     # ── 私有：分类模型推理（精确 resize，匹配 BGI YoloSharp 分类预处理）──
 
     def _classify_crop(
-        self, clf: GenshinDetector, roi: tuple[int, int, int, int]
+        self, clf: GenshinDetector, roi: tuple[int, int, int, int], label: str = "?"
     ) -> tuple[str, float]:
         """对 frame 的 roi 区域做分类，返回 (类名, 分数)。
 
         avc：``frame.crop`` 得 IImageBuffer → ``clf.classify``（avc ``classify`` 用
         exact resize，对齐 BGI YoloSharp ``Classify`` 训练分布）。
+
+        可观测性：发 ``detect.classify``（ability=fighter, model=label, name, score, ok）。
+        ``throttle_key`` 1/s 窗口——_use_burst 重试循环（最多 10 次）折叠为周期快照。
         """
         frame = self.ctx.capture()
         if frame is None:
+            self.ctx.observe.event("detect.classify", ability="fighter", model=label,
+                                   ok=False, reason="no_frame", throttle_key=f"clf:{label}")
             return "", 0.0
         crop = frame.crop(*roi)
         if crop is None:
+            self.ctx.observe.event("detect.classify", ability="fighter", model=label,
+                                   ok=False, reason="crop_fail", throttle_key=f"clf:{label}")
             return "", 0.0
-        return clf.classify(crop)
+        name, score = clf.classify(crop)
+        self.ctx.observe.event("detect.classify", ability="fighter", model=label,
+                               name=name, score=score, ok=True, throttle_key=f"clf:{label}")
+        return name, score
 
 
 # ── 模块级纯函数（供 game_state.py 单向 import，避免类循环依赖）──

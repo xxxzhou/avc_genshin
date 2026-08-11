@@ -48,6 +48,7 @@ def main(ctx, g, boss_name: str, count: int = 5) -> dict:
     from abilities.reward import claim_resin_reward
     from avc._core import KeyCode
 
+    ob = ctx.observe
     # 1. 首领路径 JSON
     path_file = res.path_json(f"boss/{boss_name}前往.json")
     if not path_file.exists():
@@ -59,23 +60,38 @@ def main(ctx, g, boss_name: str, count: int = 5) -> dict:
 
     done = 0
     while count == 0 or done < count:
+        itr = done + 1
         # 2. 传送 + 接近（走最后一段待位置追踪）
         pe.execute(pt)
+        ob.event("auto_boss.step", ability="auto_boss", phase="act",
+                 step="navigate", iter=itr, ok=True)
         # 3. 战斗到清场
         if not g.wait_until(lambda: g.has_enemy(), timeout=60):
+            ob.event("auto_boss.step", ability="auto_boss", phase="observe",
+                     step="enemy_wait", iter=itr, ok=False, reason="no_enemy")
             raise TaskError(f"到达首领附近但未进入战斗: {boss_name}")
         if not g.fight_until_clear(timeout=180):
+            ob.event("auto_boss.step", ability="auto_boss", phase="act",
+                     step="fight", iter=itr, ok=False, reason="timeout")
             raise TaskError(f"战斗超时未清场: {boss_name}")
+        ob.event("auto_boss.step", ability="auto_boss", phase="act",
+                 step="fight", iter=itr, ok=True)
         # 4. 领奖：等交互提示 → 按 F → 树脂领取
         g.wait_main_ui(timeout=20)
         if not g.wait_until(
             lambda: has_chest_f_icon(ctx) or has_flower_f_icon(ctx), timeout=20
         ):
+            ob.event("auto_boss.step", ability="auto_boss", phase="observe",
+                     step="reward_icon_wait", iter=itr, ok=False, reason="no_reward_icon")
             raise TaskError(f"未检测到首领奖励交互提示: {boss_name}")
         g.press(KeyCode.f)
         if not g.wait_until(lambda: g.find_text("原粹树脂") is not None, timeout=15):
+            ob.event("auto_boss.step", ability="auto_boss", phase="observe",
+                     step="reward_dialog_wait", iter=itr, ok=False, reason="no_reward_dialog")
             raise TaskError("未出现树脂奖励对话框")
         ok = claim_resin_reward(ctx, g)
+        ob.event("auto_boss.step", ability="auto_boss", phase="act",
+                 step="claim", iter=itr, ok=ok, exhausted=not ok)
         done += 1
         if not ok:
             raise NormalEnd(f"树脂耗尽，已完成 {done} 次讨伐")

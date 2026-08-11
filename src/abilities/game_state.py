@@ -110,12 +110,22 @@ def _find_template(
     frame: "IImageBuffer | None" = None,
     threshold: float = 0.8,
     roi: tuple[int, int, int, int] | None = None,
+    _quiet: bool = False,
 ) -> bool:
-    """单模板匹配：存在返回 True。"""
+    """单模板匹配：存在返回 True。
+
+    可观测性：发 ``detect.ui``（ability=game_state, name=tpl_key, threshold, ok, score）。
+    所有 ``has_*`` 走此咽喉。``_quiet=True`` 时同 name 整 run 只发首条——**场景分类器
+    10Hz 主犯必须传 True**（见 ``make_classifier``），否则爆 JSONL。
+    """
     if ctx.tm is None:
+        ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
+                          ok=False, reason="no_tm", _quiet=_quiet)
         return False
     buf = frame if frame is not None else ctx.capture()
     if buf is None:
+        ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
+                          ok=False, reason="no_frame", _quiet=_quiet)
         return False
     ctx.tm.clearTemplates()
     if roi:
@@ -124,8 +134,24 @@ def _find_template(
         ctx.tm.clearRoi()
     path = _tpl_path(tpl_key)
     if ctx.tm.addTemplatePath(path, threshold) < 0:
+        ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
+                          ok=False, reason="template_missing", _quiet=_quiet)
         return False
-    return ctx.tm.match(buf) > 0
+    n = ctx.tm.match(buf)
+    if n <= 0:
+        ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
+                          threshold=threshold, ok=False, _quiet=_quiet)
+        return False
+    score = None
+    try:
+        r = ctx.tm.getMatch(0)
+        if r is not None:
+            score = r.score
+    except Exception:
+        pass
+    ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
+                      threshold=threshold, ok=True, score=score, _quiet=_quiet)
+    return True
 
 
 # ── 像素检测辅助 ──
@@ -171,24 +197,24 @@ def _near_black_ratio(frame: "IImageBuffer", y_start: int = 0, y_end: int | None
 # ── 场景特征原语 ──
 
 
-def has_paimon_menu(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_paimon_menu(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """主界面：左上角派蒙菜单图标（BGI ``IsInMainUi``，ROI=topLeftQuarter）。"""
-    return _find_template(ctx, "paimon_menu", frame, roi=(0, 0, 480, 270))
+    return _find_template(ctx, "paimon_menu", frame, roi=(0, 0, 480, 270), _quiet=_quiet)
 
 
-def has_disabled_ui_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_disabled_ui_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """对话中：左上角"自动"禁用按钮（BGI ``IsInTalkUi``，ROI=AutoSkip 区域）。"""
-    return _find_template(ctx, "disabled_ui", frame, roi=(0, 0, 640, 135))
+    return _find_template(ctx, "disabled_ui", frame, roi=(0, 0, 640, 135), _quiet=_quiet)
 
 
-def has_map_scale_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_map_scale_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """大地图：缩放按钮（BGI ``IsInBigMapUi``，ROI=左侧窄条）。"""
-    return _find_template(ctx, "map_scale_btn", frame, roi=(30, 440, 40, 200))
+    return _find_template(ctx, "map_scale_btn", frame, roi=(30, 440, 40, 200), _quiet=_quiet)
 
 
-def has_map_settings_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_map_settings_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """大地图：设置按钮（BGI ``IsInBigMapUi`` 备选，ROI=左下角）。"""
-    return _find_template(ctx, "map_settings_btn", frame, roi=(25, 990, 58, 62))
+    return _find_template(ctx, "map_settings_btn", frame, roi=(25, 990, 58, 62), _quiet=_quiet)
 
 
 def has_map_close_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
@@ -196,9 +222,9 @@ def has_map_close_btn(ctx: "GameContext", frame: "IImageBuffer | None" = None) -
     return _find_template(ctx, "map_close_btn", frame, roi=(1813, 19, 58, 58))
 
 
-def has_in_domain(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_in_domain(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """秘境内：左上角秘境图标（BGI ``IsInDomain``，ROI=topLeftQuarter，需排除全白）。"""
-    if not _find_template(ctx, "in_domain", frame, roi=(0, 0, 480, 270)):
+    if not _find_template(ctx, "in_domain", frame, roi=(0, 0, 480, 270), _quiet=_quiet):
         return False
     # BGI 逻辑：若匹配区域全白则视为不在秘境
     buf = frame if frame is not None else ctx.capture()
@@ -214,15 +240,15 @@ def has_in_domain(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bo
     return False  # 全白 → 不在秘境
 
 
-def is_loading_screen(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def is_loading_screen(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """加载界面：近黑帧占比 > 90% 或检测到加载 UI 元素。"""
     buf = frame if frame is not None else ctx.capture()
     if buf is None:
         return False
     # 方法一：检测加载 UI 模板
-    if _find_template(ctx, "enter_game", buf):
+    if _find_template(ctx, "enter_game", buf, _quiet=_quiet):
         return True
-    if _find_template(ctx, "girl_moon", buf):
+    if _find_template(ctx, "girl_moon", buf, _quiet=_quiet):
         return True
     # 方法二：帧中间 1/3 近黑占比 > 90%
     h = buf.height
@@ -231,24 +257,32 @@ def is_loading_screen(ctx: "GameContext", frame: "IImageBuffer | None" = None) -
 
 
 def is_low_hp(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
-    """当前角色红血：像素 (808, 1010) 为红色 (B=90, G=90, R=255)（BGI ``CurrentAvatarIsLowHp``）。"""
+    """当前角色红血：像素 (808, 1010) 为红色 (B=90, G=90, R=255)（BGI ``CurrentAvatarIsLowHp``）。
+
+    可观测性：发 ``survival.low_hp``（ability=game_state, source=pixel, ok=健康态=not low），
+    **跳变才发**（``_transition``）——auto_eat 6.6Hz 轮询不会爆，仅在红血↔健康切换时浮现。
+    痛点④（血少不吃药）：红血出现却无后续 survival.check 吃药动作 = 嫌疑在这。
+    """
     buf = frame if frame is not None else ctx.capture()
     if buf is None:
         return False
     if buf.width < 810 or buf.height < 1012:
         return False
     b, g, r, _ = _pixel_bgra(buf, 808, 1010)
-    return r >= 240 and r <= 255 and g >= 80 and g <= 100 and b >= 80 and b <= 100
+    low = r >= 240 and r <= 255 and g >= 80 and g <= 100 and b >= 80 and b <= 100
+    ctx.observe.event("survival.low_hp", ability="game_state", source="pixel",
+                      ok=(not low), _transition=True)
+    return low
 
 
-def has_recovery_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_recovery_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """便携营养袋可用（Recovery 图标存在，BGI ``CheckRecovery``）。"""
-    return _find_template(ctx, "recovery", frame)
+    return _find_template(ctx, "recovery", frame, _quiet=_quiet)
 
 
-def has_resurrection_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_resurrection_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """复活提示（Resurrection 图标，BGI ``CheckResurrection``）。"""
-    return _find_template(ctx, "resurrection", frame)
+    return _find_template(ctx, "resurrection", frame, _quiet=_quiet)
 
 
 def has_chest_f_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
@@ -271,9 +305,9 @@ def has_go_teleport(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> 
     return _find_template(ctx, "go_teleport", frame)
 
 
-def has_page_close(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
+def has_page_close(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
     """关闭页面按钮（对话/菜单弹出页，BGI ``PageClose``）。"""
-    return _find_template(ctx, "page_close", frame)
+    return _find_template(ctx, "page_close", frame, _quiet=_quiet)
 
 
 def has_icon_option(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:
@@ -412,24 +446,26 @@ def make_classifier(ctx: "GameContext") -> SceneClassifier:
     """
 
     def classify(frame: "IImageBuffer") -> SceneState:
+        # ⚠ 场景分类器 10Hz 轮询：所有 has_* 传 _quiet=True，否则爆 JSONL。
+        # 场景结果本身已由每条事件的 scene 字段携带，分类内部模板命中无诊断价值。
         # 对话（最高优先：对话中不应误判为主界面）
-        if has_disabled_ui_btn(ctx, frame):
+        if has_disabled_ui_btn(ctx, frame, _quiet=True):
             return SceneState(scene=Scene.DIALOG, confidence=0.95)
 
         # 大地图
-        if has_map_scale_btn(ctx, frame) or has_map_settings_btn(ctx, frame):
+        if has_map_scale_btn(ctx, frame, _quiet=True) or has_map_settings_btn(ctx, frame, _quiet=True):
             return SceneState(scene=Scene.MAP, confidence=0.95)
 
         # 加载
-        if is_loading_screen(ctx, frame):
+        if is_loading_screen(ctx, frame, _quiet=True):
             return SceneState(scene=Scene.LOADING, confidence=0.9)
 
         # 秘境
-        if has_in_domain(ctx, frame):
+        if has_in_domain(ctx, frame, _quiet=True):
             return SceneState(scene=Scene.DOMAIN, confidence=0.9)
 
         # 战斗：主界面（派蒙菜单在）+ 屏幕上有血条 → COMBAT
-        if has_paimon_menu(ctx, frame):
+        if has_paimon_menu(ctx, frame, _quiet=True):
             from abilities.fighter import has_enemy_in_frame
 
             if has_enemy_in_frame(frame):
@@ -437,7 +473,7 @@ def make_classifier(ctx: "GameContext") -> SceneClassifier:
             return SceneState(scene=Scene.MAIN_UI, confidence=0.9)
 
         # 菜单/其他：有关闭按钮但不在上述场景
-        if has_page_close(ctx, frame):
+        if has_page_close(ctx, frame, _quiet=True):
             return SceneState(scene=Scene.MENU, confidence=0.7)
 
         return SceneState(scene=Scene.UNKNOWN, confidence=0.0)

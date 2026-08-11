@@ -57,8 +57,8 @@ class AutoEatDaemon(Daemon):
         low = is_low_hp(dctx.ctx, frame)
         dctx.shared.low_hp = low
 
-        # 检测复活图标（最高优先）
-        if has_resurrection_icon(dctx.ctx, frame):
+        # 检测复活图标（最高优先）—— _quiet=True：auto_eat 6.6Hz 轮询，首次命中后折叠
+        if has_resurrection_icon(dctx.ctx, frame, _quiet=True):
             dctx.ctx.press(KeyCode.z)  # QuickUseGadget
             dctx.observe.event("action", action="auto_eat", reason="resurrection")
             self._last_eat_time = now
@@ -69,7 +69,7 @@ class AutoEatDaemon(Daemon):
         if low:
             # Recovery 缓存：30 秒内不重复检测
             if now - self._recovery_cache_time >= 30:
-                self._recovery_cached = has_recovery_icon(dctx.ctx, frame)
+                self._recovery_cached = has_recovery_icon(dctx.ctx, frame, _quiet=True)
                 self._recovery_cache_time = now
 
             if self._recovery_cached:

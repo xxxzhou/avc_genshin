@@ -80,63 +80,38 @@ def main(
     craft_country: str = "蒙德",
 ) -> dict:
     """每日总控主流程。返回各步骤结果摘要。"""
+    ob = ctx.observe
     results: dict = {}
 
+    def _run_step(name: str, thunk):
+        """跑一个子任务，发 daily.step（ability=daily, step=name, ok/exhausted/error）。"""
+        try:
+            res = thunk()
+            results[name] = res
+            ob.event("daily.step", ability="daily", phase="act",
+                     step=name, ok=True)
+        except NormalEnd as e:
+            results[name] = {"exhausted": True, "msg": str(e)}
+            ob.event("daily.step", ability="daily", phase="act",
+                     step=name, ok=True, exhausted=True)
+        except TaskError as e:
+            results[name] = {"error": str(e)}
+            ob.event("daily.step", ability="daily", phase="act",
+                     step=name, ok=False, reason="subtask_error", error=str(e))
+
     # ── 1. 领邮件 ──
-    try:
-        mail_result = g.run("claim_mail")
-        results["mail"] = mail_result
-    except TaskError as e:
-        results["mail"] = {"error": str(e)}
-
+    _run_step("mail", lambda: g.run("claim_mail"))
     # ── 2. 合成浓缩树脂 ──
-    try:
-        craft_result = g.run("craft_resin", country=craft_country)
-        results["craft"] = craft_result
-    except TaskError as e:
-        results["craft"] = {"error": str(e)}
-
+    _run_step("craft", lambda: g.run("craft_resin", country=craft_country))
     # ── 3. 自动秘境 ──
-    try:
-        domain_result = g.run("auto_domain", domain_name=domain_name, count=domain_count)
-        results["domain"] = domain_result
-    except NormalEnd as e:
-        results["domain"] = {"exhausted": True, "msg": str(e)}
-    except TaskError as e:
-        results["domain"] = {"error": str(e)}
-
+    _run_step("domain", lambda: g.run("auto_domain", domain_name=domain_name, count=domain_count))
     # ── 4. 自动首领讨伐 ──
-    try:
-        boss_result = g.run("auto_boss", boss_name=boss_name, count=boss_count)
-        results["boss"] = boss_result
-    except NormalEnd as e:
-        results["boss"] = {"exhausted": True, "msg": str(e)}
-    except TaskError as e:
-        results["boss"] = {"error": str(e)}
-
+    _run_step("boss", lambda: g.run("auto_boss", boss_name=boss_name, count=boss_count))
     # ── 5. 自动地脉之花 ──
-    try:
-        ley_result = g.run(
-            "auto_ley_line", region=ley_line_region, count=ley_line_count
-        )
-        results["ley_line"] = ley_result
-    except NormalEnd as e:
-        results["ley_line"] = {"exhausted": True, "msg": str(e)}
-    except TaskError as e:
-        results["ley_line"] = {"error": str(e)}
-
+    _run_step("ley_line", lambda: g.run("auto_ley_line", region=ley_line_region, count=ley_line_count))
     # ── 6. 领取每日奖励 ──
-    try:
-        daily_result = g.run("claim_daily_reward", country=country)
-        results["daily_reward"] = daily_result
-    except TaskError as e:
-        results["daily_reward"] = {"error": str(e)}
-
+    _run_step("daily_reward", lambda: g.run("claim_daily_reward", country=country))
     # ── 7. 尘歌壶 ──
-    try:
-        pot_result = g.run("enter_pot")
-        results["pot"] = pot_result
-    except TaskError as e:
-        results["pot"] = {"error": str(e)}
+    _run_step("pot", lambda: g.run("enter_pot"))
 
     return results

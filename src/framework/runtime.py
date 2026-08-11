@@ -32,6 +32,7 @@ from framework.errors import (
 )
 from framework.logging import JsonlLogger, new_run_id
 from framework.observe import Observe
+from framework.report import live_line, summarize, summary_text
 from framework.policy import Policy
 from framework.shared import SharedState
 
@@ -160,6 +161,8 @@ class Runtime:
         )
         self._g = HighLevelApi(self.ctx, runtime=self)
         observe.event("run_start", task=task_name)
+        # 实时打印订阅者：每条事件一行进 stderr（不用 StatusLine——它是单行 5s 清屏，不适合事件流）
+        observe.subscribe(lambda e: print(live_line(e), file=sys.stderr))
         self._notify_task = task_name
         notify("task_start", task=task_name)
 
@@ -241,6 +244,11 @@ class Runtime:
         except Exception:
             pass
         if self._observe is not None:
+            # run_summary：按 ability 分组摘要（替代塞 task_return——后者早于 teardown 发，时序对不上）。
+            # AI 读 jsonl → 找 run_summary → 配合用户提示点名坏在哪个 ability 的哪个 stage/reason。
+            summary = summarize(self._observe.timeline())
+            self._observe.event("run_summary", summary=summary)
+            print(summary_text(summary), file=sys.stderr)
             self._observe.event("run_end")
             self._observe.logger.close()
         self._token = None

@@ -36,21 +36,35 @@ def claim_resin_reward(
     1. 反复点『使用原粹树脂』直到它消失（每次点击后等 ``_CLICK_INTERVAL_S`` 再查）
     2. 期间出现『补充原粹树脂』→ 树脂耗尽 → 关页返回 False
     3. 点完 → ESC 关奖励页 → 等回主界面
-    """
-    from framework.scene import Scene
 
+    可观测性：发 ``reward.claim``（ability=reward, use_resin_found, click_count,
+    exhausted, ok, reason=exhausted|claimed|timeout）。boss/ley_line/domain 共用。
+    """
+    ob = ctx.observe
+    click_count = 0
+    use_resin_found = False
+    exhausted = False
+    ended = "timeout"  # 默认：循环耗尽 deadline 仍未消失（可疑成功）
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if g.find_text(_EXHAUSTED) is not None:
-            _close_reward_page(ctx, g)
-            return False
+            exhausted = True
+            ended = "exhausted"
+            break
         rect = g.find_text(_USE_RESIN)
         if rect is None:
-            break  # 已消耗完
+            ended = "claimed"  # 『使用原粹树脂』消失 = 已消耗完
+            break
+        use_resin_found = True
         g.click(rect.cx, rect.cy)
+        click_count += 1
         time.sleep(_CLICK_INTERVAL_S)
     _close_reward_page(ctx, g)
-    return True
+    ok = not exhausted
+    ob.event("reward.claim", ability="reward", phase="act",
+             use_resin_found=use_resin_found, click_count=click_count,
+             exhausted=exhausted, ok=ok, reason=ended)
+    return ok
 
 
 def _close_reward_page(ctx: "GameContext", g: "HighLevelApi") -> None:

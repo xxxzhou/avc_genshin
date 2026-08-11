@@ -129,26 +129,40 @@ class PathExecutor:
         self.warnings: list[str] = []  # 未处理的 action 等，非致命
 
     def execute(self, task: PathTask) -> None:
-        """执行路径任务。按传送点分段，逐段传送+行走。"""
+        """执行路径任务。按传送点分段，逐段传送+行走。
+
+        可观测性：每段发 ``path.segment``（ability=path, action=teleport|walk, waypoint, ok）。
+        痛点②：walk 段 ``ok=go_to(...)``——此前 go_to 返回值被丢弃，无法定位是哪段走失败。
+        """
         from abilities.navigation.navigator import Navigator
         from abilities.navigation.tp import Teleporter
 
+        ob = self.ctx.observe
         segments = self._split_by_teleport(task.waypoints)
         teleporter = Teleporter(self.ctx, self.g)
         navigator = Navigator(self.ctx, self.g)
 
-        for segment in segments:
+        for seg_idx, segment in enumerate(segments):
             if not segment:
                 continue
             # 首点为传送
             if segment[0].type == "teleport":
-                tran_x, tran_y = teleporter.teleport_to((segment[0].x, segment[0].y))
+                wp0 = segment[0]
+                tran_x, tran_y = teleporter.teleport_to((wp0.x, wp0.y))
                 # 传送后锚定 navigator 的 prev（解决无 prev 时 6 层小地图定位选错层；
                 # Navigator 有独立 PositionGetter，与 Teleporter 的不共享，需单独设）
                 navigator.set_prev_position(tran_x, tran_y)
+                ob.event("path.segment", ability="path", phase="act",
+                         seg=seg_idx, action="teleport",
+                         waypoint=(round(wp0.x), round(wp0.y)), ok=True,
+                         landed=(round(tran_x), round(tran_y)))
             # 行走剩余路径点（move_mode 传给 Navigator：fly 先跳起 / climb 跳过卡死）
             for wp in segment[1:]:
-                navigator.go_to(wp)
+                ok = navigator.go_to(wp)
+                ob.event("path.segment", ability="path", phase="act",
+                         seg=seg_idx, action="walk", move_mode=wp.move_mode,
+                         waypoint=(round(wp.x), round(wp.y)), ok=ok,
+                         reason=None if ok else "go_to_failed")
                 self._handle_action(wp)
 
     def _handle_action(self, wp: Waypoint) -> None:
@@ -156,7 +170,10 @@ class PathExecutor:
 
         未实现的 action 记 ``warnings`` 不阻断（骨架；实机按需补）。stop_flying
         用"到点后按空格落地"的简化，精确时机（BGI 是前移处理器）待实机验证。
+
+        可观测性：发 ``path.action``（ability=path, action, ok, reason=unhandled 兜底）。
         """
+        ob = self.ctx.observe
         action = (wp.action or "").strip()
         if not action:
             return
@@ -164,6 +181,7 @@ class PathExecutor:
             from avc._core import KeyCode
         except Exception:  # 无 avc：按键动作跳过（测试/降级）
             KeyCode = None
+        handled = True
         if action == "stop_flying":
             if KeyCode is not None:
                 self.g.press(KeyCode.space)  # 落地（实机验证空格退出滑翔）
@@ -178,9 +196,14 @@ class PathExecutor:
         elif action == "force_tp":
             pass  # teleport 段首已处理
         else:
+            handled = False
             self.warnings.append(
                 f"未处理 action={action!r} @({wp.x:.1f},{wp.y:.1f})"
             )
+        ob.event("path.action", ability="path", phase="act",
+                 action=action, ok=handled,
+                 reason=None if handled else "unhandled",
+                 waypoint=(round(wp.x), round(wp.y)))
 
     @staticmethod
     def _split_by_teleport(waypoints: tuple[Waypoint, ...]) -> list[list[Waypoint]]:

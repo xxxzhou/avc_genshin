@@ -124,6 +124,7 @@ avc_genshin/
 - **分辨率任意**：框架自动把非 1080P 的截图缩放归一化到 1920×1080 输出（所有坐标基于 1080p），无需启动检查报错。
 - **拟人化必须启用**——⚠️ avc 的 Python 绑定**没有** `setHumanize`（实测 `swig/python/avc/input.py` 仅 `setMoveDurationMs`/`setMoveSteps`/`setKeyDelayMs`）。拟人化（坐标抖动 + 0.8–1.2× 随机操作间隔 + 按住时长随机）由**框架层**实现：`framework/utils.py` 原语 + `GameContext`/`high_level_api` 每次输入套用。原神以管理员运行，本程序亦须管理员。
 - **BetterGI ONNX = YoloSharp = 标准 Ultralytics YOLOv8/YOLO11 格式**（源码核实：BGI 无自定义解码，全委托 YoloSharp NuGet）。真正坑：①**别再做 sigmoid**（已 bake 进图）②布局 `[1,4+nc,N]` 需转置 ③letterbox min 比例+居中 padding，框按 `(x-pad)/scale` 反变换（conf 0.3 / IoU 0.45，NMS 按类纯 IoU）。类名从 ONNX 元数据 `names` 读（旧 `label.json` 已废弃）。实现见 `src/abilities/detector.py`。
+- **能力可观测性（绑定）**——每个 ability 与 `src/tasks/*.py` 任务插件在每个「看/选/结果」决策点发结构化事件 `ctx.observe.event(kind, ability=..., ok=..., reason=..., ...)`；`ctx.observe` 永可调用（无 runtime 时返 no-op 单例，永不判空）。AI 从 `logs/<run_id>.jsonl` 的 `run_summary` 按 `ability` 分组定位坏在哪个能力的哪个 stage/reason。热轮询（场景分类器 10Hz / `wait_*` 5Hz）传 `_quiet=True`/`throttle_key` 节流防爆。新写 ability/任务（含 AI 生成插件）必须遵守，详见 `设计实现.md §2#5` + `§4.4`。
 - 仅供技术研究学习；使用自动化工具可能违反游戏服务条款。
 
 ## 9. 运行（规划）

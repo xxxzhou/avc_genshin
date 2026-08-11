@@ -423,6 +423,21 @@ class GameContext:
 
     runtime = None  # Runtime 构造时设置（ctx.runtime = self），见 runtime.py
 
+    @property
+    def observe(self):
+        """结构化观测句柄（``设计实现.md §4.4``）。
+
+        永可调用、**永不返回 None**：活跃 run 内返真 ``Observe``，否则返 ``_NullObserve``
+        单例（no-op）。ability 用 ``ctx.observe.event("<domain>.<stage>", ability=..., ...)``
+        发「看/选/结果」事件，AI 据此定位坏在哪个 ability。调用方**不得** ``if ctx.observe``。
+        """
+        from framework.observe import _NULL
+
+        rt = self.runtime
+        if rt is not None and rt._observe is not None:
+            return rt._observe
+        return _NULL
+
     def mount(self, name: str, **opts) -> None:
         self.runtime.mount(name, **opts)
 

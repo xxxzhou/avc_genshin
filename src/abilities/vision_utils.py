@@ -86,14 +86,21 @@ def find_template(
     threshold: float = 0.8,
     roi: tuple[int, int, int, int] | None = None,
     frame: "IImageBuffer | None" = None,
+    _quiet: bool = False,
 ) -> Rect | None:
     """即时查模板，返回首个命中（按 orderBy）或 None。
 
     threshold 推荐 0.7–0.8；roi=(x,y,w,h) 限定区域；frame=None 时自动截图。
+
+    可观测性：发 ``detect.template``（ability=vision_utils, name, threshold, ok, score,
+    match_pos）。``_quiet=True`` 时同 name 整 run 只发首条（热轮询 wait_template 用）。
     """
     tm = _need(ctx, "tm")
     buf = _frame(ctx, frame)
     if buf is None:
+        ctx.observe.event("detect.template", ability="vision_utils",
+                          name=Path(path).name, threshold=threshold, ok=False,
+                          reason="no_frame", _quiet=_quiet)
         return None
     tm.clearTemplates()
     if roi:
@@ -101,13 +108,27 @@ def find_template(
     else:
         tm.clearRoi()
     if tm.addTemplatePath(_resolve_template_path(path), threshold) < 0:
+        ctx.observe.event("detect.template", ability="vision_utils",
+                          name=Path(path).name, threshold=threshold, ok=False,
+                          reason="template_missing", _quiet=_quiet)
         return None
-    if tm.match(buf) <= 0:
+    n = tm.match(buf)
+    if n <= 0:
+        ctx.observe.event("detect.template", ability="vision_utils",
+                          name=Path(path).name, threshold=threshold, ok=False,
+                          _quiet=_quiet)
         return None
     r = tm.getMatch(0)
     if r is None:
+        ctx.observe.event("detect.template", ability="vision_utils",
+                          name=Path(path).name, threshold=threshold, ok=False,
+                          _quiet=_quiet)
         return None
-    return Rect(r.x, r.y, r.w, r.h, r.score)
+    rect = Rect(r.x, r.y, r.w, r.h, r.score)
+    ctx.observe.event("detect.template", ability="vision_utils",
+                      name=Path(path).name, threshold=threshold, ok=True,
+                      score=r.score, match_pos=(rect.cx, rect.cy), _quiet=_quiet)
+    return rect
 
 
 def find_all_templates(
@@ -151,11 +172,18 @@ def find_text(
     kw: str,
     roi: tuple[int, int, int, int] | None = None,
     frame: "IImageBuffer | None" = None,
+    _quiet: bool = False,
 ) -> Rect | None:
-    """OCR 子串匹配：返回含 ``kw`` 的最短文本框（避免长行误命中），或 None。"""
+    """OCR 子串匹配：返回含 ``kw`` 的最短文本框（避免长行误命中），或 None。
+
+    可观测性：发 ``detect.ocr``（ability=vision_utils, keyword, ok, score, match_pos）。
+    ``_quiet=True`` 时同 keyword 整 run 只发首条（热轮询 wait_text 用）。
+    """
     ocr = _need(ctx, "ocr")
     buf = _frame(ctx, frame)
     if buf is None:
+        ctx.observe.event("detect.ocr", ability="vision_utils", keyword=kw,
+                          ok=False, reason="no_frame", _quiet=_quiet)
         return None
     if roi:
         ocr.setRoi(*roi)
@@ -172,7 +200,14 @@ def find_text(
             rect = Rect(r.x, r.y, r.w, r.h, r.score)
             if best is None or len(t) < len(best[0]):
                 best = (t, rect)
-    return best[1] if best else None
+    if best is None:
+        ctx.observe.event("detect.ocr", ability="vision_utils", keyword=kw,
+                          ok=False, _quiet=_quiet)
+        return None
+    ctx.observe.event("detect.ocr", ability="vision_utils", keyword=kw, ok=True,
+                      score=best[1].score, match_pos=(best[1].cx, best[1].cy),
+                      _quiet=_quiet)
+    return best[1]
 
 
 def ocr_region(
@@ -182,11 +217,19 @@ def ocr_region(
     w: int,
     h: int,
     frame: "IImageBuffer | None" = None,
+    _quiet: bool = False,
 ) -> list[tuple[str, float]]:
-    """OCR 指定区域，返回 [(text, score), ...]。"""
+    """OCR 指定区域，返回 [(text, score), ...]。
+
+    可观测性：发 ``detect.ocr``（ability=vision_utils, region, count, ok 仅在无帧时 False）。
+    纯观测（命中数量本身无成败），``_quiet=True`` 时同 region 整 run 只发首条。
+    """
     ocr = _need(ctx, "ocr")
     buf = _frame(ctx, frame)
     if buf is None:
+        ctx.observe.event("detect.ocr", ability="vision_utils",
+                          region=(x, y, w, h), count=0, ok=False, reason="no_frame",
+                          _quiet=_quiet)
         return []
     ocr.setRoi(x, y, w, h)
     ocr.recognize(buf)
@@ -196,6 +239,8 @@ def ocr_region(
         if t is not None and r is not None:
             out.append((t, r.score))
     ocr.clearRoi()
+    ctx.observe.event("detect.ocr", ability="vision_utils", region=(x, y, w, h),
+                      count=len(out), sample=out[0][0] if out else None, _quiet=_quiet)
     return out
 
 

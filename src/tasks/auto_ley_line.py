@@ -53,6 +53,7 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "启示之花", coun
     from abilities.reward import claim_resin_reward
     from avc._core import KeyCode
 
+    ob = ctx.observe
     # 1. 按 region 挑路径
     path_dir = res.path_json("ley_line")
     candidates = sorted(path_dir.glob(f"{region}*.json")) if path_dir.exists() else []
@@ -65,22 +66,39 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "启示之花", coun
 
     done = 0
     while count == 0 or done < count:
+        itr = done + 1
         # 2. 到地脉花附近
         pe.execute(pt)
+        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
+                 step="navigate", iter=itr, path=candidates[0].name, ok=True)
         # 3. 激活地脉花
         if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=60):
+            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                     step="flower_wait", iter=itr, ok=False, reason="no_flower_icon")
             raise TaskError(f"未检测到地脉花交互提示: {candidates[0].name}")
         g.press(KeyCode.f)
+        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
+                 step="activate", iter=itr, ok=True)
         # 4. 战斗到清场
         if not g.fight_until_clear(timeout=180):
+            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
+                     step="fight", iter=itr, ok=False, reason="timeout")
             raise TaskError("地脉战斗超时未清场")
+        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
+                 step="fight", iter=itr, ok=True)
         # 5. 领奖：等花交互提示 → 按 F → 树脂领取
         if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=20):
+            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                     step="reward_icon_wait", iter=itr, ok=False, reason="no_reward_icon")
             raise TaskError("未检测到地脉花领奖交互提示")
         g.press(KeyCode.f)
         if not g.wait_until(lambda: g.find_text("原粹树脂") is not None, timeout=15):
+            ob.event("auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                     step="reward_dialog_wait", iter=itr, ok=False, reason="no_reward_dialog")
             raise TaskError("未出现树脂奖励对话框")
         ok = claim_resin_reward(ctx, g)
+        ob.event("auto_ley_line.step", ability="auto_ley_line", phase="act",
+                 step="claim", iter=itr, ok=ok, exhausted=not ok)
         done += 1
         if not ok:
             raise NormalEnd(f"树脂耗尽，已完成 {done} 次地脉")

@@ -71,6 +71,11 @@ class MockContext:
     def ensure_foreground(self, wait_s=0.0):
         return True
 
+    @property
+    def observe(self):
+        from framework.observe import _NULL
+        return _NULL
+
 
 # ── 血条检测（纯 CV）──
 

@@ -61,7 +61,8 @@ class Navigator:
         self.g = g
         self._position_getter = PositionGetter(ctx)
         self._camera = CameraControl(ctx)
-        self._trap_escaper = TrapEscaper(ctx)
+        # 注入 position_getter：脱困前后采样判定 escaped（nav.stuck 事件）
+        self._trap_escaper = TrapEscaper(ctx, position_getter=self._position_getter)
 
     def go_to(
         self,
@@ -85,6 +86,7 @@ class Navigator:
 
         self.ctx.ensure_foreground()  # 移动全程 ic 直调，开头保证前台
         start_time = time.monotonic()
+        ob = self.ctx.observe
         last_record_time = start_time
         too_far_count = 0
         sprint = False  # run/dash 冲刺（finally 释放用）
@@ -128,10 +130,15 @@ class Navigator:
             except Exception:
                 pass
 
+            target_xy = (round(waypoint.x), round(waypoint.y))
             while time.monotonic() - start_time < timeout:
                 # 获取当前位置
                 position = self._position_getter.get_position()
                 if position is None:
+                    # 定位缺失（SIFT 未中）：节流观察，不 abort（可能瞬时）；持续缺失→末轮 timeout 兜底
+                    ob.event("nav.step", ability="nav", phase="observe",
+                             target=target_xy, reason="pos_fail", mode=mode,
+                             throttle_key="nav.step")
                     time.sleep(0.1)
                     continue
 
@@ -140,17 +147,41 @@ class Navigator:
 
                 # 到达
                 if dist < tolerance:
+                    ob.event("nav.step", ability="nav", phase="decide", ok=True, reason="arrived",
+                             target=target_xy, pos=(round(position[0]), round(position[1])),
+                             dist=round(dist), mode=mode)
                     return True
 
-                # 过远
+                # 朝向（提前算，供观察事件 + 转向决策复用，避免双读 compass）
+                target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
+                current_angle = self._camera.get_orientation()
+                heading_diff = (
+                    round(self._camera._angle_diff(current_angle, target_angle), 1)
+                    if current_angle is not None else None
+                )
+
+                # 过远（定位可能错乱 / 视口漂移）
                 if dist > _TOO_FAR_DISTANCE:
                     too_far_count += 1
+                    ob.event("nav.step", ability="nav", phase="observe",
+                             target=target_xy, reason="too_far", dist=round(dist),
+                             too_far_count=too_far_count, mode=mode,
+                             throttle_key="nav.step")
                     if too_far_count > 50:
+                        ob.event("nav.step", ability="nav", phase="decide", ok=False,
+                                 reason="abort_too_far", dist=round(dist),
+                                 too_far_count=too_far_count)
                         return False
                     time.sleep(0.05)
                     continue
                 else:
                     too_far_count = 0
+
+                # 移动观察（节流 ~1/s）：让 AI 看「角色位置随时间逼近/偏离目标」+ 朝向偏差
+                ob.event("nav.step", ability="nav", phase="observe",
+                         target=target_xy, pos=(round(position[0]), round(position[1])),
+                         dist=round(dist), heading_diff=heading_diff, mode=mode,
+                         throttle_key="nav.step")
 
                 # 位置记录 + 卡死检测（climb 模式跳过，避免攀爬中误判乱跳）
                 if not skip_trap:
@@ -166,9 +197,11 @@ class Navigator:
                             self.ctx.ic.keyUp(KeyCode.w)
                         except Exception:
                             pass
-                        # 脱困
+                        # 脱困（trap_escaper 内发 nav.stuck）
                         self._trap_escaper.escape(waypoint)
                         if self._trap_escaper.should_abort:
+                            ob.event("nav.step", ability="nav", phase="decide", ok=False,
+                                     reason="abort_stuck", pos=(round(position[0]), round(position[1])))
                             return False
                         # 重新按住 W
                         try:
@@ -185,12 +218,9 @@ class Navigator:
                         pass
                     last_jump = time.monotonic()
 
-                # 转向：检查角度差，大角度差时停步闭环转向
-                target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
-                current_angle = self._camera.get_orientation()
+                # 转向：复用上方算的 current_angle/target_angle/heading_diff
                 if current_angle is not None:
-                    angle_diff = self._camera._angle_diff(current_angle, target_angle)
-                    if abs(angle_diff) > _REORIENT_THRESHOLD:
+                    if abs(heading_diff) > _REORIENT_THRESHOLD:
                         # 角度差过大：松开 W → 闭环转向 → 重新按住 W
                         # 避免移动中 rotate_camera_to_target 单次转向不足导致偏航/卡地形
                         try:
@@ -223,6 +253,8 @@ class Navigator:
 
                 time.sleep(_STEER_SLEEP_S)
 
+            ob.event("nav.step", ability="nav", phase="decide", ok=False, reason="timeout",
+                     target=target_xy, mode=mode)
             return False  # 超时
 
         finally:

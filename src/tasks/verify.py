@@ -44,15 +44,21 @@ from framework.status import StatusLine
             "desc": "大地图标定：SIFT 定位/zoom 测量/滚轮方向/拖拽方向 DPI/图标匹配/轴对齐。"
             "需先按 M 打开大地图；会缩放/拖动地图（非只读）",
         },
+        "probe": {
+            "type": "str",
+            "default": "",
+            "desc": "额外探针：'timeline' = 运行结束回放本次 Observe 时间线（按 ability 分组），"
+            "验证可观测性事件流是否正常落地",
+        },
     },
     tags=["diag"],
 )
-def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, do_ocr: bool = True, do_map_calib: bool = False) -> dict:
+def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, do_ocr: bool = True, do_map_calib: bool = False, probe: str = "") -> dict:
     """逐项探测并打印。返回 ``{"results": {探测名: 结果串}}``。"""
     results: dict[str, str] = {}
     status = StatusLine()
 
-    def probe(name: str, fn) -> None:
+    def _probe(name: str, fn) -> None:
         """跑一个探测：异常也记录（ERR ...），不中断整体。"""
         status.show(f"[verify] {name} ...")
         try:
@@ -64,7 +70,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         status.show(f"[verify] {name}: {tag}")
 
     # ── 1. 截图基础 ──
-    probe("capture", lambda: _capture_info(ctx))
+    _probe("capture", lambda: _capture_info(ctx))
 
     # ── 2. 截图速率 ──
     def _fps():
@@ -74,10 +80,10 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             ctx.capture()
         t1 = time.perf_counter()
         return f"{N / (t1 - t0):.1f} fps ({N} frames in {t1 - t0:.2f}s)"
-    probe("capture_fps", _fps)
+    _probe("capture_fps", _fps)
 
     # ── 3. SourcePlayer 状态 ──
-    probe("source_player", lambda: "active" if ctx._player is not None else "fallback (IScreenCapture)")
+    _probe("source_player", lambda: "active" if ctx._player is not None else "fallback (IScreenCapture)")
 
     # ── 4. 场景检测 ──
     def _scene_detect():
@@ -101,18 +107,18 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             except Exception as e:
                 found.append(f"{name}(ERR:{e})")
         return found if found else "none detected"
-    probe("scene_detect", _scene_detect)
+    _probe("scene_detect", _scene_detect)
 
     # ── 5. 场景分类器 ──
-    probe("scene", lambda: g.scene.scene.name if g.scene and g.scene.scene else None)
-    probe("is_loading", lambda: g.is_loading())
+    _probe("scene", lambda: g.scene.scene.name if g.scene and g.scene.scene else None)
+    _probe("is_loading", lambda: g.is_loading())
 
     # ── 6. 传送（默认只查名，不真传）──
     def _tp_lookup():
         from abilities.navigation.tp import TpDatabase
         p = TpDatabase().find_by_name(waypoint)
         return f"{waypoint!r} → {p.name if p else '未找到（名字不在 tp.json / 非 Teyvat）'}"
-    probe("tp_lookup", _tp_lookup)
+    _probe("tp_lookup", _tp_lookup)
     if do_teleport:
         # 传送涉及鼠标/键盘操作，先确保原神窗口在前台（终端/浏览器在前台则操作落空）
         try:
@@ -120,8 +126,8 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         except Exception:
             pass
         time.sleep(0.3)
-        probe("teleport_to", lambda: g.teleport_to(waypoint))
-        probe("after_tp_wait_main_ui", lambda: g.wait_main_ui(timeout=30))
+        _probe("teleport_to", lambda: g.teleport_to(waypoint))
+        _probe("after_tp_wait_main_ui", lambda: g.wait_main_ui(timeout=30))
 
     # ── 7. 定位 ──
     def _position():
@@ -159,17 +165,17 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
         dist = round((dx * dx + dy * dy) ** 0.5)
         return (f"global={global_pos}, sift={tuple(round(v, 1) for v in sift_truth)}, "
                 f"local={tuple(round(v, 1) for v in local_pos)} dist={dist}")
-    probe("position", _position)
+    _probe("position", _position)
 
     # ── 8. 朝向 ──
     def _orientation():
         from abilities.navigation.camera import CameraControl
         return CameraControl(ctx).get_orientation()
-    probe("orientation", _orientation)
+    _probe("orientation", _orientation)
 
     # ── 9. 敌人/血条 ──
-    probe("has_enemy", lambda: g.has_enemy())
-    probe(
+    _probe("has_enemy", lambda: g.has_enemy())
+    _probe(
         "nearest_enemy",
         lambda: (lambda r: None if r is None else f"({r.x},{r.y},{r.w},{r.h})")(
             g.find_nearest_enemy()
@@ -177,7 +183,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
     )
 
     # ── 10. Q 就绪 ──
-    probe("is_q_ready", lambda: g.is_q_ready())
+    _probe("is_q_ready", lambda: g.is_q_ready())
 
     # ── 11. OCR ──
     if do_ocr:
@@ -194,7 +200,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
                 t, r = ocr.getMatch(i)
                 texts.append(f"{t!r}@({r.x:.0f},{r.y:.0f})")
             return f"{n} 个文字框: {', '.join(texts[:10])}"
-        probe("ocr_boxes", _ocr_boxes)
+        _probe("ocr_boxes", _ocr_boxes)
 
     # ── 12. 大地图标定（do_map_calib；需先按 M 打开大地图，会缩放/拖动地图）──
     # 逐项回填 map_ops.py 标定常量：_ZOOM_WHEEL_SIGN / _DRAG_X_SIGN / _DRAG_Y_SIGN /
@@ -242,14 +248,14 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             pos = pg.get_position_from_big_map()
             dt = time.perf_counter() - t0
             return f"pos={pos}, {dt * 1000:.0f}ms"
-        probe("calib_bigmap_sift", _require_map(_bigmap_sift))
+        _probe("calib_bigmap_sift", _require_map(_bigmap_sift))
 
         # 12b. 缩放等级测量 —— 旋钮 Y → zoom_level 实际值（回填 _ZOOM_START_Y/END_Y 斜率）
         def _zoom_measure():
             from abilities.navigation.map_ops import MapController
 
             return f"zoom_level={MapController(ctx, g).measure_zoom_level()}"
-        probe("calib_zoom_measure", _require_map(_zoom_measure))
+        _probe("calib_zoom_measure", _require_map(_zoom_measure))
 
         # 12c. 滚轮缩放方向/步长 —— scroll dy 前后 zoom 差 → 推断 _ZOOM_WHEEL_SIGN / _ZOOM_PER_NOTCH
         def _scroll_zoom():
@@ -269,7 +275,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
                 parts.append(f"{label}: zoom={z} delta={delta}")
                 z0 = z
             return "; ".join(parts)
-        probe("calib_scroll_zoom", _require_map(_scroll_zoom))
+        _probe("calib_scroll_zoom", _require_map(_scroll_zoom))
 
         # 12d. 拖拽方向/DPI —— 拖已知向量前后 SIFT 位置差 → 验证 _DRAG_X_SIGN/_DRAG_Y_SIGN/_MAP_SCALE_FACTOR
         # ⚠ 约定（2026-08-08 修正）：drag_map(200,0)=北向+200，drag_map(0,200)=西向+200
@@ -322,7 +328,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             return (f"drag(north+200)@zoom{zoom:.2f}: Δnorth={dx}; "
                     f"drag(west+200): Δwest={dy_pos}; drag(west-200): Δwest={dy_neg}; "
                     f"pos: {p0}→{p1}→{p2}→{p3}")
-        probe("calib_drag", _require_map(_drag_probe))
+        _probe("calib_drag", _require_map(_drag_probe))
 
         # 12d2. 原始 moveBy 诊断 —— 用小步长 moveBy 测试拖拽是否生效
         def _raw_moveby_probe():
@@ -402,7 +408,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             results_parts.append(f"drag_api(125px): sift_dx={ddx3}, sift_dy={ddy3}")
 
             return "; ".join(results_parts)
-        probe("calib_raw_moveby", _require_map(_raw_moveby_probe))
+        _probe("calib_raw_moveby", _require_map(_raw_moveby_probe))
 
         # 12e. 传送点图标匹配 —— 当前视口可见图标（验证模板/阈值就绪）
         def _tp_icon_match():
@@ -416,7 +422,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
                 if r is not None:
                     out[t] = (round(r.cx), round(r.cy))
             return out if out else "no icon matched（视口内无传送点或需放大）"
-        probe("calib_tp_icon", _require_map(_tp_icon_match))
+        _probe("calib_tp_icon", _require_map(_tp_icon_match))
 
         # 12f. 坐标轴对齐 —— SIFT 定位 vs 最近 tp.json 点（人工核对轴/符号一致性）
         def _axis_check():
@@ -435,7 +441,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
             p = near[0]
             d = _m.hypot(p.x - pos[0], p.y - pos[1])
             return f"sift={pos}, nearest={p.name!r}@({p.x},{p.y}) dist={d:.0f}"
-        probe("calib_axis_check", _require_map(_axis_check))
+        _probe("calib_axis_check", _require_map(_axis_check))
 
         # 12g. zoom 扫描 SIFT 定位 —— 在不同缩放档测定位稳定性（确定"如何确定正确位置"）
         def _zoom_sift_scan():
@@ -457,7 +463,7 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
                 dt = time.perf_counter() - t0
                 parts.append(f"z{z:.2f}: pos={pos} ({dt * 1000:.0f}ms)")
             return "; ".join(parts)
-        probe("calib_zoom_sift", _require_map(_zoom_sift_scan))
+        _probe("calib_zoom_sift", _require_map(_zoom_sift_scan))
 
     # ── 打印 + 返回 ──
     ok_count = sum(1 for v in results.values() if v.startswith("OK"))
@@ -466,6 +472,20 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
     # 详细结果写 stderr（不占状态行），供事后查看
     for k, v in results.items():
         print(f"  {k:24s} {v}", file=sys.stderr)
+
+    # ── probe=timeline：回放本次 Observe 时间线（按 ability 分组）──
+    if "timeline" in probe:
+        from framework.report import summarize, summary_text
+
+        timeline = ctx.observe.timeline()
+        summary = summarize(timeline)
+        print("\n[verify] Observe 时间线摘要（按 ability 分组）：", file=sys.stderr)
+        print(summary_text(summary), file=sys.stderr)
+        print(f"[verify] 共 {len(timeline)} 条事件；最近 30 条：", file=sys.stderr)
+        for e in timeline[-30:]:
+            print(f"  {str(e.get('event')):22s} ability={e.get('ability')} "
+                  f"ok={e.get('ok')} reason={e.get('reason')}", file=sys.stderr)
+
     status.finish()
     return {"results": results}
 

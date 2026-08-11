@@ -54,6 +54,9 @@ _ROTATE_CONTROL_RATIOS = [
     (0, 1.0),
 ]
 
+# 朝向连续读取失败达此次数 → 发 cam.heading_fail（诊断「盲走」：罗盘读不到仍导航）
+_HEADING_FAIL_THRESHOLD = 5
+
 
 class CameraControl:
     """角色朝向（面朝）检测与旋转控制。
@@ -64,6 +67,8 @@ class CameraControl:
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
+        # 朝向连续 None 计数（cam.heading_fail 状态机：达阈值发一次失败，恢复发一次）
+        self._heading_none_streak = 0
 
     def get_orientation(self, frame: IImageBuffer | None = None) -> float | None:
         """从截图获取角色朝向（罗盘角 0=北，90=东，顺时针）。
@@ -74,13 +79,38 @@ class CameraControl:
 
         注意：读的是**角色面朝**。原神空闲时面朝与相机偏航独立（转相机箭头不动），
         须轻推 W 同步后才等于相机偏航 → 配对使用 ``rotate_to``（内部同步）。
+
+        可观测性：连续 N 次读不到朝向 → ``cam.heading_fail``（盲走诊断，痛点②⑤）。
         """
         if frame is None:
             frame = self.ctx.capture()
         if frame is None:
+            self._record_heading_none()
             return None
         h, _area, _dist, _color = arrow.heading_from_frame(frame)
+        if h is None:
+            self._record_heading_none()
+            return None
+        self._record_heading_ok()
         return h
+
+    def _record_heading_none(self) -> None:
+        """朝向读取失败计数；达阈值发 cam.heading_fail（进入失败态仅发一次）。"""
+        self._heading_none_streak += 1
+        if self._heading_none_streak == _HEADING_FAIL_THRESHOLD:
+            self.ctx.observe.event(
+                "cam.heading_fail", ability="cam", phase="observe",
+                ok=False, reason="heading_none", streak=self._heading_none_streak,
+            )
+
+    def _record_heading_ok(self) -> None:
+        """朝向恢复；此前处于失败态（≥阈值）则发 cam.heading_fail ok=True。"""
+        if self._heading_none_streak >= _HEADING_FAIL_THRESHOLD:
+            self.ctx.observe.event(
+                "cam.heading_fail", ability="cam", phase="observe",
+                ok=True, reason="recovered", streak=self._heading_none_streak,
+            )
+        self._heading_none_streak = 0
 
     def rotate_to(
         self,
@@ -99,19 +129,36 @@ class CameraControl:
         - max_attempts 缺省按 |diff| 估算（每轮≈26.5°），另 +5 冗余。实机(2026-08-08)：
           175° 恰好需要 9 步才收敛，且单步偶发 ±200° 异常跳变（撞地形/检测误读），
           冗余不足会耗尽步数返回 False（diag_rotloop 证实）。+5 缓冲异常。
-        """
-        if max_attempts is None:
-            current = self._read_stable()
-            if current is None:
-                return False
-            max_attempts = int(abs(self._angle_diff(current, target_angle)) / 26.0) + 5
 
+        可观测性：入口/出口各一条 ``cam.rotate``（diff, attempts, max_attempts, converged）。
+        痛点②：不收敛（reason=max_attempts）或读不到朝向（read_fail）= 转向失败 → 偏航/卡地形。
+        """
+        ob = self.ctx.observe
+        # 入口：读当前朝向算初始 diff + 确定 max_attempts
+        current = self._read_stable()
+        if current is None:
+            ob.event("cam.rotate", ability="cam", phase="act",
+                     target=target_angle, ok=False, reason="read_fail")
+            return False
+        initial_diff = self._angle_diff(current, target_angle)
+        if max_attempts is None:
+            max_attempts = int(abs(initial_diff) / 26.0) + 5
+        ob.event("cam.rotate", ability="cam", phase="act",
+                 target=target_angle, diff=round(initial_diff, 1), max_attempts=max_attempts)
+
+        used = 0
         for _ in range(max_attempts):
+            used += 1
             current = self._read_stable()
             if current is None:
+                ob.event("cam.rotate", ability="cam", phase="act", ok=False,
+                         attempts=used, max_attempts=max_attempts, reason="read_fail")
                 return False
             diff = self._angle_diff(current, target_angle)
             if abs(diff) < max_diff:
+                ob.event("cam.rotate", ability="cam", phase="act", ok=True,
+                         attempts=used, max_attempts=max_attempts,
+                         diff_final=round(diff, 1), reason="converged")
                 return True
             move_x = int(round(-diff * _PX_PER_DEG))  # +move_x→面朝增（facecal3），须反向驱动 diff
             move_x = max(-_MAX_MOVE_PX, min(_MAX_MOVE_PX, move_x))
@@ -123,8 +170,14 @@ class CameraControl:
         # 最终校验：最后一次 move 可能已收敛但未读数，读一次确认
         current = self._read_stable()
         if current is None:
+            ob.event("cam.rotate", ability="cam", phase="act", ok=False,
+                     attempts=used, max_attempts=max_attempts, reason="read_fail")
             return False
-        return abs(self._angle_diff(current, target_angle)) < max_diff
+        converged = abs(self._angle_diff(current, target_angle)) < max_diff
+        ob.event("cam.rotate", ability="cam", phase="act", ok=converged,
+                 attempts=used, max_attempts=max_attempts,
+                 reason="converged" if converged else "max_attempts")
+        return converged
 
     def _read_stable(self, tries: int = 3) -> float | None:
         """连续读箭头朝向取中位数，滤掉噪声（单次读数会跳）。"""

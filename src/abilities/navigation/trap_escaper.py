@@ -49,12 +49,15 @@ class TrapEscaper:
     - 执行脱困动作（旋转+后退+横移）
     """
 
-    def __init__(self, ctx: GameContext, max_stuck_count: int = _MAX_STUCK_COUNT):
+    def __init__(self, ctx: GameContext, max_stuck_count: int = _MAX_STUCK_COUNT,
+                 position_getter=None):
         self.ctx = ctx
         self._positions: list[tuple[float, float]] = []
         self._stuck_count: int = 0
         self._max_stuck_count: int = max_stuck_count
         self._last_record_time: float = 0.0
+        # 位置读取器（Navigator 注入）：脱困前后采样判定 escaped；None 时省略该判定
+        self._position_getter = position_getter
 
     def record_position(self, x: float, y: float) -> None:
         """记录位置采样（用于卡死检测）。
@@ -95,11 +98,21 @@ class TrapEscaper:
         3. 后退 2 秒
         4. 左移或右移 1 秒
         5. 重新朝向目标
+
+        可观测性：发 ``nav.stuck``（ability=trap, stuck_count, should_abort, actions,
+        pos_before/after, escaped）。痛点②：脱困前后采样位置判定 ``escaped``——
+        移动量 ≥ 卡死阈值=已脱困；仍原地=still_stuck（继续卡死将 abort）。
         """
+        ob = self.ctx.observe
+        pg = self._position_getter
+        pos_before = pg.get_position() if pg is not None else None
+
         try:
             from avc._core import KeyCode
         except ImportError:
             KeyCode = None
+
+        actions: list[str] = []
 
         # 1. 释放前进键
         if KeyCode is not None:
@@ -117,22 +130,46 @@ class TrapEscaper:
             self.ctx.move_by_rel(move_x, 0)
         except Exception:
             pass
+        actions.append(f"rotate{direction:+d}{angle:.0f}")
         time.sleep(0.1)  # 测试时缩短等待
 
         # 3. 后退
         if KeyCode is not None:
             self.ctx.press(KeyCode.s, hold=0.1)  # 测试时缩短
+            actions.append("back")
 
         # 4. 左移或右移
         if KeyCode is not None:
             strafe_key = KeyCode.a if direction > 0 else KeyCode.d
             self.ctx.press(strafe_key, hold=0.1)  # 测试时缩短
+            actions.append("left" if direction > 0 else "right")
         time.sleep(0.2)
 
         # 5. 增加卡死计数
         self._stuck_count += 1
 
-        # 6. 清空位置记录
+        # 6. 脱困成效：采样后位置 vs 卡死前位置（移动量≥卡死阈值=已脱困）
+        pos_after = pg.get_position() if pg is not None else None
+        escaped = None
+        if pos_before is not None and pos_after is not None:
+            moved = abs(pos_after[0] - pos_before[0]) + abs(pos_after[1] - pos_before[1])
+            escaped = moved >= _STUCK_DELTA_THRESHOLD
+        stuck_fields = dict(
+            stuck_count=self._stuck_count,
+            should_abort=self.should_abort,
+            actions=actions,
+            target=(round(target.x), round(target.y)),
+            pos_before=(round(pos_before[0]), round(pos_before[1])) if pos_before else None,
+            pos_after=(round(pos_after[0]), round(pos_after[1])) if pos_after else None,
+            escaped=escaped,
+        )
+        if escaped is not None:
+            stuck_fields["ok"] = escaped
+            if not escaped:
+                stuck_fields["reason"] = "still_stuck"
+        ob.event("nav.stuck", ability="trap", phase="act", **stuck_fields)
+
+        # 7. 清空位置记录
         self._positions.clear()
 
     def reset(self) -> None:

@@ -67,7 +67,9 @@ def detect_tp_panel(
     buf = frame if frame is not None else ctx.capture()
     if buf is None:
         return TeleportPanelKind.NONE
-    texts = vu.ocr_region(ctx, *_TP_PANEL_OCR_ROI, frame=buf)
+    # _quiet=True：detect_tp_panel 在确认/关闭循环里高频轮询，面板结果由 tp.confirm 携带，
+    # 内部 OCR 是噪声（同 region 首条后折叠，避免 detect.ocr 爆）
+    texts = vu.ocr_region(ctx, *_TP_PANEL_OCR_ROI, frame=buf, _quiet=True)
     joined = "".join(t for t, _ in texts)
     for kw in _MARKER_KEYWORDS:
         if kw in joined:
