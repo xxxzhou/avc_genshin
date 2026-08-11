@@ -47,8 +47,12 @@ class MockImageBuffer:
         return bytes(self._data)
 
     def set_pixel(self, x: int, y: int, b: int, g: int, r: int, a: int = 255):
+        # 字节序与实机 avc ``to_bytes()`` 对齐：RGBA8（首字节=R）。
+        # 调用方仍按 BGR 命名传参（直观表达颜色），但 pack 时按 RGBA 序写入，
+        # 使 mock 的 ``to_bytes()`` 输出与实机一致——实机标定见
+        # ``game_state._pixel_bgra`` 注释（2026-08-08 标定 avc 输出 RGBA8）。
         offset = (y * self._width + x) * 4
-        struct.pack_into("BBBB", self._data, offset, b, g, r, a)
+        struct.pack_into("BBBB", self._data, offset, r, g, b, a)
 
 
 class MockTemplateMatcher:

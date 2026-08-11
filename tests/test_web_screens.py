@@ -43,13 +43,19 @@ pytestmark = pytest.mark.skipif(not _has_avc(), reason="需 avc")
 
 
 def _make_ctx():
-    """最小 GameContext 替身：tm/ocr（模板/OCR 匹配器）+ _dpi_scale（CameraControl 需）。
-    与 test_real_screens.py 一致，仅补 _dpi_scale 让朝向诊断可跑。"""
+    """最小 GameContext 替身：tm/ocr（模板/OCR 匹配器）+ _dpi_scale（CameraControl 需）
+    + observe（_NullObserve 单例——能力可观测性约定：``ctx.observe`` 永可调用、永不判空）。
+
+    SimpleNamespace 无 ``observe`` 属性会让 ``game_state.has_*`` /
+    ``make_classifier`` 内的 ``ctx.observe.event(...)`` 抛 AttributeError（2026-08-11
+    可观测性落地后的回归点）。补 ``observe=_NULL`` 修复。
+    """
     from avc import Vision
+    from framework.observe import _NULL
 
     return SimpleNamespace(
         tm=Vision.createTemplateMatcher(), ocr=Vision.createTextRecognizer(),
-        _dpi_scale=1.0,
+        _dpi_scale=1.0, observe=_NULL,
     )
 
 

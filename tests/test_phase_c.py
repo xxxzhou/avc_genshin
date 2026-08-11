@@ -175,7 +175,13 @@ class TestActiveSlot:
         )
         assert f._active_slot_index() == 1
 
-    def test_first_active_wins(self):
+    def test_two_active_indistinguishable_returns_none(self):
+        """两个槽同色 active（药丸强度相近）→ 无法判定返回 None。
+
+        实现的故意行为（``fighter._active_slot_index`` 注释：编队未满/切换中/
+        界面不符→无法判定）。argmin+gap 设计：次弱-最弱 < ``_INDEX_ACTIVE_GAP``
+        即认为差距不足，宁可不判也不乱判。
+        """
         from abilities.fighter import SimpleFighter
 
         f = SimpleFighter(
@@ -184,7 +190,7 @@ class TestActiveSlot:
             ),
             g=None,
         )
-        assert f._active_slot_index() == 0  # 取第一个非白
+        assert f._active_slot_index() is None
 
     def test_none_when_all_white(self):
         from abilities.fighter import SimpleFighter
