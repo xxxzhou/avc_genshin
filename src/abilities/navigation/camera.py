@@ -142,7 +142,10 @@ class CameraControl:
             return False
         initial_diff = self._angle_diff(current, target_angle)
         if max_attempts is None:
-            max_attempts = int(abs(initial_diff) / 26.0) + 5
+            # 入口 diff 估算 max_attempts，但加最小下限 8（subagent 2026-08-12 报告
+            # Bug 1：入口 diff=-0.1 时 max_attempts=5 不够循环噪声收敛——180 度歧义
+            # 噪声让循环内 diff 跳到 60+，剩余 4 次不够）。
+            max_attempts = max(int(abs(initial_diff) / 26.0) + 5, 8)
         ob.event("cam.rotate", ability="cam", phase="act",
                  target=target_angle, diff=round(initial_diff, 1), max_attempts=max_attempts)
 

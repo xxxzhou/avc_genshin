@@ -45,20 +45,26 @@ _MATCH_THRESHOLD = 0.8
 def enter_serenitea_pot(ctx: "GameContext", g: "HighLevelApi") -> bool:
     """进入尘歌壶。
 
-    流程：传送尘歌壶区域 → 找住宅图标 → 传送 → 等主界面。
+    ⚠ **v1 设计 bug（2026-08-12 实机发现）**：当前用 ``g.teleport_to("尘歌壶")``，
+    但尘歌壶不在 tp.json（不是传送点是背包小道具）。任务进度.md 待修：
+    重写为「按 B 开背包 → 切小道具页签 → 选尘歌壶 → 按"放置/进入" → 等加载」。
 
-    ⚠ v1 简化：假设 ``g.teleport_to`` 能直接传送到尘歌壶（依赖传送链；
-    实际 BGI 是切区域 + 找图标 + 点传送按钮的复杂流程，待实机补全）。
-
-    返回 True = 成功进入。
+    当前实现：直接尝试 teleport_to，失败时发清晰事件（不静默）。
     """
-    # 传送到尘歌壶（v1：直接传住宅名，传送链实现具体逻辑）
+    ob = ctx.observe
     try:
         g.teleport_to("尘歌壶", map_name="SereniteaPot")
-    except Exception:
+    except Exception as e:
+        ob.event("pot.step", ability="pot", phase="observe",
+                 step="enter_teleport", ok=False,
+                 reason="not_implemented_backpack_flow_required",
+                 error=repr(e))
         return False
 
     if not g.wait_main_ui(timeout=30.0):
+        ob.event("pot.step", ability="pot", phase="observe",
+                 step="wait_main_ui_after_enter", ok=False,
+                 reason="main_ui_timeout")
         return False
     return True
 

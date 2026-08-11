@@ -78,6 +78,15 @@ class HighLevelApi:
         if self.runtime._observe is not None:
             self.runtime._observe.event(kind, **fields)
 
+    def _save_evidence(self, tag: str) -> str | None:
+        """失败时存截图（teardown 竞态时返 None）。"""
+        if self.runtime._observe is not None:
+            try:
+                return self.runtime._observe.save_evidence(self.ctx, tag)
+            except Exception:
+                return None
+        return None
+
     @property
     def observe(self):
         """结构化观测句柄（``设计实现.md §4.4``），与 ``ctx.observe`` 同源。
@@ -288,6 +297,8 @@ class HighLevelApi:
         mc = MapController(self.ctx, self)
         frame = self.ctx.capture()
         if frame is None:
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="capture_initial", ok=False, reason="no_frame")
             return None
 
         # ★ 调整缩放到固定等级再检测（BGI LocateLeyLineOutcrop 做法）
@@ -296,6 +307,10 @@ class HighLevelApi:
         # ⚠ 注意：放大时视口范围缩小，需先把花移到中心避免丢失。
         zoom = mc.measure_zoom_level(frame) or 3.0
         blossoms = mc.find_blossom_on_map(frame)
+        self._observe("detect.blossom", ability="tp", phase="observe",
+                      step="find_initial", zoom_measured=zoom,
+                      count=len(blossoms), ok=len(blossoms) > 0,
+                      reason=None if blossoms else "no_blossom_initial")
         if blossoms:
             # 把最近的花移到视口中心，再缩放
             best = blossoms[0]
@@ -306,11 +321,15 @@ class HighLevelApi:
                 utils.sleep(0.3)
                 frame = self.ctx.capture()
                 if frame is None:
+                    self._observe("detect.blossom", ability="tp", phase="observe",
+                                  step="recapture_after_drag", ok=False, reason="no_frame")
                     return None
         mc.set_zoom_level(3.0, frame)
         utils.sleep(0.3)
         frame = self.ctx.capture()
         if frame is None:
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="recapture_after_zoom", ok=False, reason="no_frame")
             return None
 
         # 1. 检测花图标
@@ -318,12 +337,25 @@ class HighLevelApi:
         if flower_type:
             blossoms = [b for b in blossoms if b.blossom_type == flower_type]
         if not blossoms:
+            # ⚠ 失败时存图：让 AI 能看到当时地图状态（视口是否对/zoom 是否对）
+            evidence = self._save_evidence("find_blossom_no_match")
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="find_after_zoom", ok=False,
+                          reason="no_blossom_after_zoom",
+                          flower_type_filter=flower_type or None,
+                          zoom_set=3.0,
+                          evidence=evidence)
             return None
 
         # 2. SIFT 定位视口中心
         pg = PositionGetter(self.ctx)
         viewport = pg.get_position_from_big_map(frame)
         if viewport is None:
+            evidence = self._save_evidence("find_blossom_sift_fail")
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="sift_viewport", ok=False, reason="sift_failed",
+                          blossom_count=len(blossoms),
+                          evidence=evidence)
             return None
 
         # 3. 测量缩放
@@ -335,10 +367,19 @@ class HighLevelApi:
         best = blossoms[0]
         game_pos = mc.screen_to_game(best.screen_x, best.screen_y, viewport, zoom)
 
-        # 5. 查最近传送点
+        # 5. 查最近传送点（排除秘境 Domain —— 地脉花在野外，需走锚点/神像）
         db = TpDatabase()
-        nearest = db.find_nearest(game_pos[0], game_pos[1], n=1)
+        candidates = db.find_nearest(game_pos[0], game_pos[1], n=10)
+        # 过滤掉 Domain 类型（OneTimeDomain 一次性秘境 / BlessDomain 圣遗物本 / etc）
+        nearest = [
+            p for p in candidates
+            if "Domain" not in p.type and p.type != "Domain"
+        ]
         if not nearest:
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="nearest_tp", ok=False, reason="no_tp_in_db",
+                          game_pos=game_pos,
+                          candidates=[(p.name, p.type) for p in candidates[:5]])
             return None
 
         self._observe(

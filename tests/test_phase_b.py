@@ -821,6 +821,98 @@ class TestNavigatorMoveModes:
         assert len(space_presses) > 0  # 周期跳被触发
 
 
+class TestNavigatorWalkingAway:
+    """walking_away 检测（dist 连续上升 5 次 → 反向挣脱，subagent 报告 Bug 4 修复）。"""
+
+    @staticmethod
+    def _nav_with_positions(positions):
+        """构造 navigator，position_getter 依次返回 positions 列表中的位置。"""
+        from itertools import count
+
+        from abilities.navigation.navigator import Navigator
+
+        ctx = MagicMock()
+        ctx.ic = MagicMock()
+        ctx.press = MagicMock()
+        nav = Navigator(ctx, MagicMock())
+        # 依次返回 positions 中的位置（每次调用前进一个）
+        positions_iter = iter(positions)
+
+        def _next_pos():
+            try:
+                return next(positions_iter)
+            except StopIteration:
+                return positions[-1]
+
+        nav._position_getter = MagicMock(get_position=_next_pos)
+        nav._camera = MagicMock()
+        nav._camera.get_orientation.return_value = 100.0
+        nav._camera._angle_diff.return_value = 0.0
+        nav._camera.rotate_to = MagicMock(return_value=True)
+        nav._trap_escaper = MagicMock(
+            is_stuck=lambda: False, escape=MagicMock(), should_abort=False,
+            record_position=lambda x, y: None,
+        )
+        return nav, ctx
+
+    def test_walking_away_triggers_reverse(self):
+        """dist 连续上升 5 次触发 walking_away → 按 S 反向挣脱 + rotate 180°。"""
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        # 角色从 (50,0) 走反方向：dist 应该从 50 上升到 60
+        # 但位置变化反映走反：start (50,0) -> (45,0) -> (40,0)... 即 dx 变小=远离 target=(100,0)
+        positions = [(50, 0), (45, 0), (40, 0), (35, 0), (30, 0), (25, 0), (20, 0)]
+        nav, ctx = self._nav_with_positions(positions)
+        nav.go_to(Waypoint(x=100.0, y=0.0, move_mode="walk"), timeout=2.0)
+        # 应该看到 press(KeyCode.s, hold=1.0) —— 反向挣脱
+        s_presses = [
+            c for c in ctx.press.call_args_list
+            if c.args and c.args[0] == KeyCode.s
+        ]
+        assert len(s_presses) > 0, "walking_away 应触发按 S 反向挣脱"
+
+    def test_approaching_no_walking_away(self):
+        """dist 持续下降时不触发 walking_away（不按 S）。"""
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        # 角色向 target 走近：(50,0) -> (60,0) -> (70,0) -> (80,0) -> (85,0) -> (90,0) -> (95,0)
+        positions = [(50, 0), (60, 0), (70, 0), (80, 0), (85, 0), (90, 0), (95, 0)]
+        nav, ctx = self._nav_with_positions(positions)
+        nav.go_to(Waypoint(x=100.0, y=0.0, move_mode="walk"), timeout=2.0)
+        s_presses = [
+            c for c in ctx.press.call_args_list
+            if c.args and c.args[0] == KeyCode.s
+        ]
+        assert len(s_presses) == 0, "dist 下降时不应按 S"
+
+    def test_no_progress_triggers_reverse(self):
+        """dist 振荡不下降（卡地形）触发 no_progress → 按 S 反向挣脱。
+
+        craft_resin 实机案例：dist=459-522 振荡，walking_away 没触发
+        （要求持续上升）。no_progress 检测 15 步没创新低即触发。
+        """
+        from avc._core import KeyCode
+
+        from abilities.navigation.path_executor import Waypoint
+
+        # 角色原地小范围振荡（pos.match 噪声 + 真实卡地形）
+        # target=(100,0)，角色在 (50,0) 附近 ±5 振荡，dist 50±5
+        positions = [(50, 0)] * 20  # 完全静止 20 步
+        nav, ctx = self._nav_with_positions(positions)
+        nav.go_to(Waypoint(x=100.0, y=0.0, move_mode="walk"), timeout=5.0)
+        s_presses = [
+            c for c in ctx.press.call_args_list
+            if c.args and c.args[0] == KeyCode.s
+        ]
+        assert len(s_presses) > 0, "完全静止 15 步应触发 no_progress 按 S"
+
+
+
+
 # ── 大图 SIFT 视口重定位（get_position_from_big_map）──
 
 

@@ -135,15 +135,15 @@ class TrapEscaper:
 
         # 3. 后退
         if KeyCode is not None:
-            self.ctx.press(KeyCode.s, hold=0.1)  # 测试时缩短
+            self.ctx.press(KeyCode.s, hold=_ESCAPE_BACK_DURATION)
             actions.append("back")
 
         # 4. 左移或右移
         if KeyCode is not None:
             strafe_key = KeyCode.a if direction > 0 else KeyCode.d
-            self.ctx.press(strafe_key, hold=0.1)  # 测试时缩短
+            self.ctx.press(strafe_key, hold=_ESCAPE_STRAFE_DURATION)
             actions.append("left" if direction > 0 else "right")
-        time.sleep(0.2)
+        time.sleep(0.3)
 
         # 5. 增加卡死计数
         self._stuck_count += 1

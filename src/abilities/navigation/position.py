@@ -432,12 +432,33 @@ class PositionGetter:
                 local_layers.remove(self._prev_layer_idx)
                 local_layers.insert(0, self._prev_layer_idx)
             order = local_layers + other_layers
+            # has_prev 模式下，先搜 local_layers（覆盖 prev_position 的层）。
+            # local_layers 失败回退到 other_layers（global 模式）时，加合理性检查：
+            # 全局匹配容易 false positive（subagent 2026-08-12 报告 Bug 3：
+            # MapBack_0 大层 score 0.856 假阳性，prev 锁死在错位置 dist=13km）。
+            # 修：global 回退时收集所有 other_layers 候选，取最高分；且
+            # 距 prev_position > 1000 单位的结果要求 score > 0.95。
+            used_fallback = False  # 追踪是否走了 local→global 回退（可观测性）
             for idx in order:
                 layer = layers[idx]
                 is_local = idx in local_layers
                 result = self._match_layer(layer, mini156, mask, local=is_local)
                 if result is not None:
                     gx, gy, score = result
+                    # local 匹配（prev 附近）直接采纳
+                    if is_local:
+                        best_result = (gx, gy, idx)
+                        sel_score = score
+                        break
+                    # global 回退（other_layers）：合理性检查
+                    used_fallback = True
+                    dist_to_prev = (
+                        (gx - self._prev_x) ** 2 + (gy - self._prev_y) ** 2
+                    ) ** 0.5
+                    if dist_to_prev > 1000.0 and score < 0.95:
+                        # 距 prev 太远且分数不够高 → 嫌疑假阳性，继续找
+                        candidate_scores.append(score)
+                        continue
                     best_result = (gx, gy, idx)
                     sel_score = score
                     break
@@ -474,15 +495,29 @@ class PositionGetter:
         if best_result is not None:
             self._prev_layer_idx = best_result[2]
             in_cov = layers[best_result[2]].contains(best_result[0], best_result[1])
+            # mode 区分 local / local_fallback_global / global（subagent 2026-08-12 建议）：
+            # local = local_layers 命中；local_fallback_global = local 失败后全局回退；
+            # global = 无 prev。让 AI 一眼看出"局部锚定失败"危险态。
+            if has_prev:
+                mode_str = "local_fallback_global" if used_fallback else "local"
+            else:
+                mode_str = "global"
+            # prev_distance：结果距 prev_position 的距离（仅 has_prev 时有意义）。
+            # AI 据此判断锚定是否合理（>1000 + score<0.95 = 嫌疑假阳性，已被合理性检查过滤）。
+            prev_dist = (
+                round(((best_result[0] - self._prev_x) ** 2 + (best_result[1] - self._prev_y) ** 2) ** 0.5)
+                if has_prev else None
+            )
             self.ctx.observe.event(
                 "pos.match", ability="pos", phase="decide",
-                has_prev=has_prev, mode=("local" if has_prev else "global"),
+                has_prev=has_prev, mode=mode_str,
                 selected_layer=layers[best_result[2]].layer_id,
                 selected_score=round(sel_score, 3),
                 candidate_count=len(candidate_scores),
                 top_scores=[round(s, 3) for s in sorted(candidate_scores, reverse=True)[:4]],
                 in_coverage=in_cov,
                 pos=(round(best_result[0]), round(best_result[1])),
+                prev_distance=prev_dist,
                 ok=True, throttle_key="pos.match",
             )
             return (best_result[0], best_result[1])

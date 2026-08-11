@@ -116,12 +116,14 @@ def find_template(
     if n <= 0:
         ctx.observe.event("detect.template", ability="vision_utils",
                           name=Path(path).name, threshold=threshold, ok=False,
+                          reason="template_not_matched",
                           _quiet=_quiet)
         return None
     r = tm.getMatch(0)
     if r is None:
         ctx.observe.event("detect.template", ability="vision_utils",
                           name=Path(path).name, threshold=threshold, ok=False,
+                          reason="getMatch_none",
                           _quiet=_quiet)
         return None
     rect = Rect(r.x, r.y, r.w, r.h, r.score)

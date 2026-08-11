@@ -32,9 +32,17 @@ if TYPE_CHECKING:
 # 默认阈值（02 §4 护栏；实机调参后写回此处）
 DEFAULTS = {
     "same_reason_n": 30,   # 同 (ability,event,reason) 窗口内 N 次（含 ok=True/None/False）
-    "same_fail_n": 20,     # 同 (ability,event,scene,ok=False) 窗口内 N 次
+    "same_fail_n": 30,     # 同 (ability,event,scene,ok=False) 窗口内 N 次
     "window_sec": 60.0,
 }
+
+# 扫描否定白名单：这些 reason 表示「合理轮询中的预期否定」（如 wait_until 等 UI 出现），
+# 不计入 same_fail 死循环检测。否则 wait_until 60s 轮询 120 次会误触发。
+# 真死循环的 reason（如 nav.step too_far / tp.navigate dist_too_far）不在白名单。
+IGNORE_REASONS = frozenset({
+    "template_not_matched",  # 模板未匹配（场景分类器扫非当前场景模板 / wait_until 等 UI）
+    "no_blood_bar",          # 血条色块未检测到（MAIN_UI 无怪 / 视角无怪）
+})
 
 
 class GuardRail:
@@ -88,18 +96,26 @@ class GuardRail:
         ok = event.get("ok")
         now = time.monotonic()
 
-        # 规则 1：同 (ability, event, reason) 窗口内 N 次（覆盖热轮询死循环）
-        # reason 可能是 None（成功事件），仍计入——捕捉"反复同动作无脑重试"
-        k1 = (ability, kind, reason)
-        d1 = self._reason_hits.get(k1)
-        if d1 is None:
-            d1 = deque()
-            self._reason_hits[k1] = d1
-        d1.append(now)
-        self._trim(d1, now)
-        if len(d1) >= self.same_reason_n:
-            self._fire(rule="same_reason", key=k1, count=len(d1), scene=scene)
+        # 扫描否定白名单（template_not_matched/no_blood_bar = 合理轮询否定）
+        # 跳过 same_reason + same_fail 双规则——避免 wait_until 等 UI 反复扫描误杀
+        if reason in IGNORE_REASONS:
             return
+
+        # reason=None 的事件（成功/未填）不算 same_reason 死循环：
+        # 反复成功的 pos.match / nav.step（reason=None 普通走步）是正常热轮询。
+        # 死循环信号必须有明确 reason（如 nav.step too_far / tp.navigate dist_too_far）。
+        if reason is not None:
+            # 规则 1：同 (ability, event, reason) 窗口内 N 次（覆盖热轮询死循环）
+            k1 = (ability, kind, reason)
+            d1 = self._reason_hits.get(k1)
+            if d1 is None:
+                d1 = deque()
+                self._reason_hits[k1] = d1
+            d1.append(now)
+            self._trim(d1, now)
+            if len(d1) >= self.same_reason_n:
+                self._fire(rule="same_reason", key=k1, count=len(d1), scene=scene)
+                return
 
         # 规则 2：同 (ability, event, scene, ok=False) 窗口内 N 次（覆盖错位循环）
         if ok is False:

@@ -131,6 +131,12 @@ class Navigator:
                 pass
 
             target_xy = (round(waypoint.x), round(waypoint.y))
+            last_dist: float | None = None  # 上一次 dist，用于检测 dist 上升（走反）
+            dist_increase_count = 0          # 连续上升次数
+            _DIST_INCREASE_LIMIT = 5         # 连续 5 次 dist 上升 = 走反，反向挣脱
+            min_dist_so_far: float | None = None  # 历史最小 dist（长期无进展检测）
+            no_progress_count = 0            # 距上次创新低的步数
+            _NO_PROGRESS_LIMIT = 15          # 15 步没创新低 = 卡地形，反向挣脱
             while time.monotonic() - start_time < timeout:
                 # 获取当前位置
                 position = self._position_getter.get_position()
@@ -144,6 +150,85 @@ class Navigator:
 
                 # 计算距离
                 dist = CameraControl.distance(position, (waypoint.x, waypoint.y))
+
+                # 长期无进展检测（dist 振荡不下降）：即使 dist 没持续上升，
+                # 但 N 步没创新低 = 角色卡地形（craft_resin 实机案例：dist=459-522 振荡）
+                if min_dist_so_far is None or dist < min_dist_so_far - 1.0:
+                    min_dist_so_far = dist
+                    no_progress_count = 0
+                else:
+                    no_progress_count += 1
+                    if no_progress_count >= _NO_PROGRESS_LIMIT:
+                        ob.event("nav.step", ability="nav", phase="decide",
+                                 target=target_xy, pos=(round(position[0]), round(position[1])),
+                                 dist=round(dist), min_dist=round(min_dist_so_far),
+                                 mode=mode, ok=False, reason="no_progress",
+                                 no_progress_count=no_progress_count)
+                        # 反向挣脱：松 W → 按 S 倒退 → 转 180° → 继续
+                        try:
+                            self.ctx.ic.keyUp(KeyCode.w)
+                        except Exception:
+                            pass
+                        try:
+                            self.ctx.press(KeyCode.s, hold=1.5)
+                        except Exception:
+                            pass
+                        current_angle = self._camera.get_orientation()
+                        if current_angle is not None:
+                            self._camera.rotate_to(
+                                (current_angle + 180.0) % 360.0,
+                                max_diff=10.0, max_attempts=15,
+                            )
+                        try:
+                            self.ctx.ic.keyDown(KeyCode.w)
+                        except Exception:
+                            pass
+                        # 重置所有检测器
+                        no_progress_count = 0
+                        min_dist_so_far = None
+                        last_dist = None
+                        dist_increase_count = 0
+                        time.sleep(0.2)
+                        continue
+
+                # 走反检测：dist 连续上升 N 次 = 朝向错（cam.rotate 失败 / 读朝向失败）
+                # 触发反向挣脱：按 S 倒退 + 转向 180° + 继续
+                if last_dist is not None and dist > last_dist + 2.0:
+                    dist_increase_count += 1
+                    if dist_increase_count >= _DIST_INCREASE_LIMIT:
+                        ob.event("nav.step", ability="nav", phase="decide",
+                                 target=target_xy, pos=(round(position[0]), round(position[1])),
+                                 dist=round(dist), mode=mode,
+                                 ok=False, reason="walking_away",
+                                 dist_increase_count=dist_increase_count)
+                        # 反向挣脱：松 W → 按 S 倒退 1s → 转 180° → 继续
+                        try:
+                            self.ctx.ic.keyUp(KeyCode.w)
+                        except Exception:
+                            pass
+                        try:
+                            self.ctx.press(KeyCode.s, hold=1.0)
+                        except Exception:
+                            pass
+                        # 反向转向（target + 180）
+                        current_angle = self._camera.get_orientation()
+                        if current_angle is not None:
+                            self._camera.rotate_to((current_angle + 180.0) % 360.0, max_diff=10.0)
+                        try:
+                            self.ctx.ic.keyDown(KeyCode.w)
+                        except Exception:
+                            pass
+                        # 重置所有检测器
+                        dist_increase_count = 0
+                        last_dist = None
+                        min_dist_so_far = None
+                        no_progress_count = 0
+                        time.sleep(0.2)
+                        continue
+                elif last_dist is not None and dist < last_dist - 1.0:
+                    # dist 下降，重置计数
+                    dist_increase_count = 0
+                last_dist = dist
 
                 # 到达
                 if dist < tolerance:
@@ -232,7 +317,10 @@ class Navigator:
                         # 故 rotate_to 完成后须重新读位置算 target_angle，
                         # 若仍 > REORIENT 则继续转向（而非回主循环触发又一轮停步-转向）
                         for _reorient in range(10):  # 最多 10 轮闭环
-                            self._camera.rotate_to(target_angle, max_diff=5.0)
+                            if _reorient == 0:
+                                prev_diff = 360.0  # 收敛趋势基线（首次必不触发"没收窄"）
+                            # 显式 max_attempts=15（subagent 2026-08-12 报告 P2：默认 5 不够）
+                            self._camera.rotate_to(target_angle, max_diff=5.0, max_attempts=15)
                             # 重新读位置算 target_angle
                             new_pos = self._position_getter.get_position()
                             if new_pos is not None:
@@ -241,8 +329,18 @@ class Navigator:
                             new_angle = self._camera.get_orientation()
                             if new_angle is None:
                                 break
-                            if abs(self._camera._angle_diff(new_angle, target_angle)) <= _REORIENT_THRESHOLD:
+                            new_diff = abs(self._camera._angle_diff(new_angle, target_angle))
+                            if new_diff <= _REORIENT_THRESHOLD:
                                 break
+                            # diff 收敛趋势检测（subagent P2）：连续 3 轮 diff 没收窄 → break 避免空烧
+                            if _reorient >= 2 and new_diff >= prev_diff - 1.0:
+                                ob.event("nav.step", ability="nav", phase="observe",
+                                         target=target_xy, pos=(round(position[0]), round(position[1])),
+                                         dist=round(CameraControl.distance(position, (waypoint.x, waypoint.y))),
+                                         mode=mode, reason="reorient_not_converging",
+                                         reorient_attempt=_reorient, diff=round(new_diff, 1))
+                                break
+                            prev_diff = new_diff
                         try:
                             self.ctx.ic.keyDown(KeyCode.w)
                         except Exception:

@@ -160,8 +160,57 @@ class TestNoFalsePositive:
         assert not token.cancel.called
 
     def test_missing_ability_falls_back_to_framework(self):
-        """事件无 ability 字段时归类为 (framework)，仍正常计数。"""
+        """事件无 ability 字段时归类为 (framework)，仍正常计数（需带 reason）。"""
         guard, token, _ = _make_guard(same_reason_n=2)
-        guard.on_event({"event": "run_start"})  # 无 ability
-        guard.on_event({"event": "run_start"})
+        # reason=None 不算 same_reason（设计变更：避免热轮询成功事件误杀）
+        # 这里用 reason="loop" 验证 framework 归类仍工作
+        guard.on_event({"event": "run_start", "reason": "loop"})  # 无 ability
+        guard.on_event({"event": "run_start", "reason": "loop"})
         assert token.cancel.called  # 归类 (framework) 也算
+
+
+class TestReasonNoneSkipped:
+    """reason=None 的事件不算 same_reason 死循环（设计变更 2026-08-12）。
+
+    反复成功的 pos.match / nav.step（reason=None 普通走步）是正常热轮询。
+    死循环信号必须有明确 reason（如 nav.step too_far）。
+    """
+
+    def test_reason_none_skipped_same_reason(self):
+        """reason=None 即使>>阈值也不触发 same_reason。"""
+        guard, token, _ = _make_guard(same_reason_n=5)
+        for _ in range(50):
+            guard.on_event(_ev(reason=None))  # 默认 reason=None
+        assert not token.cancel.called
+
+
+class TestIgnoreReasons:
+    """扫描否定白名单：template_not_matched/no_blood_bar 不触发护栏。"""
+
+    def test_template_not_matched_skipped_same_reason(self):
+        """同 (ability,event,reason=template_not_matched) 即使>>阈值也不触发 same_reason。"""
+        guard, token, _ = _make_guard(same_reason_n=5)
+        for _ in range(50):  # 远超阈值
+            guard.on_event(_ev(reason="template_not_matched"))
+        assert not token.cancel.called
+
+    def test_template_not_matched_skipped_same_fail(self):
+        """ok=False + reason=template_not_matched 不触发 same_fail。"""
+        guard, token, _ = _make_guard(same_fail_n=5)
+        for _ in range(50):
+            guard.on_event(_ev(reason="template_not_matched", ok=False, scene="map"))
+        assert not token.cancel.called
+
+    def test_no_blood_bar_skipped(self):
+        """reason=no_blood_bar（无血条）也不触发——合理否定。"""
+        guard, token, _ = _make_guard(same_reason_n=5, same_fail_n=5)
+        for _ in range(50):
+            guard.on_event(_ev(reason="no_blood_bar", ok=False))
+        assert not token.cancel.called
+
+    def test_real_failure_reason_still_fires(self):
+        """真死循环 reason（如 nav.step too_far）仍然触发——白名单只过滤扫描否定。"""
+        guard, token, _ = _make_guard(same_reason_n=5)
+        for _ in range(5):
+            guard.on_event(_ev(reason="too_far"))  # 真死循环
+        assert token.cancel.called

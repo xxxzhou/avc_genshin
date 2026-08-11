@@ -27,7 +27,7 @@ MINIMAP_W = 216
 MINIMAP_H = 216
 
 # 检测参数
-_AREA_MIN = 50      # 箭头填充面积下限（白描边碎片约 56，箭头约 265）
+_AREA_MIN = 30      # 箭头填充面积下限（subagent 2026-08-12 报告 P3：50 太严，部分遮挡/渲染模糊时碎片 <50 被误过滤）
 _AREA_MAX = 2000    # 上限（防与附近色块粘连成大团）
 _DIST_MAX = 45.0    # 候选质心距小地图中心的最大距离
 _SYM_THRESH = 0.35  # 对称分阈值：低于=非箭头
@@ -70,7 +70,16 @@ def _sym_heading(pts: np.ndarray) -> tuple[float | None, float]:
     span = max(tmax - tmin, 1e-6)
     w_min = np.ptp(perp[np.abs(t - tmin) < 0.2 * span]) if np.sum(np.abs(t - tmin) < 0.2 * span) > 3 else 1e9
     w_max = np.ptp(perp[np.abs(t - tmax) < 0.2 * span]) if np.sum(np.abs(t - tmax) < 0.2 * span) > 3 else 1e9
-    tip_t = tmin if w_min < w_max else tmax  # 尖端更窄
+    # 尖端选择：要求**显著**宽度差（subagent 2026-08-12 报告 Bug 1：w_min/w_max
+    # 在噪声下翻转导致朝向跳 180 度）。宽度比 < 0.7 才认为显著窄=尖端；否则
+    # 认为朝向不可靠（两端宽度近），返回 None 让调用方重试，避免 180 度歧义锁死。
+    if w_min < w_max * 0.7:
+        tip_t = tmin  # tmin 端显著更窄 = 尖端
+    elif w_max < w_min * 0.7:
+        tip_t = tmax  # tmax 端显著更窄 = 尖端
+    else:
+        # 两端宽度接近（< 30% 差异）：噪声敏感，不可靠
+        return None, best_score
     tip_x = cx0 + ux * tip_t
     tip_y = cy0 + uy * tip_t
     h = (90 - math.degrees(math.atan2(-(tip_y - cy0), tip_x - cx0))) % 360
