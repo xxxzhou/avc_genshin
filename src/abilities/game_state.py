@@ -140,7 +140,8 @@ def _find_template(
     n = ctx.tm.match(buf)
     if n <= 0:
         ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
-                          threshold=threshold, ok=False, _quiet=_quiet)
+                          threshold=threshold, ok=False, reason="template_not_matched",
+                          _quiet=_quiet)
         return False
     score = None
     try:

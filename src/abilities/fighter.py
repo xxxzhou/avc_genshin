@@ -190,7 +190,8 @@ class SimpleFighter:
         bars = detect_blood_bars(frame)
         if not bars:
             self.ctx.observe.event("detect.blood", ability="fighter", count=0,
-                                   ok=False, throttle_key="find_enemy")
+                                   ok=False, reason="no_blood_bar",
+                                   throttle_key="find_enemy")
             return None
         bars.sort(
             key=lambda r: abs(r.cx - _PRE_AIM[0]) + abs(r.cy - _PRE_AIM[1])

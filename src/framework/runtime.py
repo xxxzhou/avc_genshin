@@ -96,6 +96,7 @@ class Runtime:
         self._observe: Observe | None = None
         self._dctx: "DaemonCtx | None" = None
         self._g: "HighLevelApi | None" = None
+        self._guard: "GuardRail | None" = None  # 健康度护栏（每 run 重建）
         self._nest_depth = 0  # ctx.run 嵌套深度（04 §6.2，上限 8）
 
         self._hotkey_listener: "HotkeyListener | None" = None
@@ -163,6 +164,12 @@ class Runtime:
         observe.event("run_start", task=task_name)
         # 实时打印订阅者：每条事件一行进 stderr（不用 StatusLine——它是单行 5s 清屏，不适合事件流）
         observe.subscribe(lambda e: print(live_line(e), file=sys.stderr))
+        # 健康度护栏订阅者：触发阈值 → token.cancel + save_evidence + emit auto_kill
+        # 解决"任务出问题停不下来"——不用等 F9/超时，能力死循环即自动止损（见 guardrail.py）
+        from framework.guardrail import GuardRail
+
+        self._guard = GuardRail(token, observe, self.ctx)
+        observe.subscribe(self._guard.on_event)
         self._notify_task = task_name
         notify("task_start", task=task_name)
 
