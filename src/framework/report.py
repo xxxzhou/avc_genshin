@@ -6,7 +6,7 @@
 - ``summarize(timeline)`` / ``summary_text(summary)``：整 run 时间线 → 按 ``ability`` 分组的
   通过/失败摘要，写进 ``run_summary`` 事件 + teardown 时 stderr 打印。
 
-设计目标（见 ``设计实现.md §4.4``）：跑 task → AI 拿 jsonl 里 ``run_summary`` 一行 → 按
+设计目标（见 ``设计实现.md §2``）：跑 task → AI 拿 jsonl 里 ``run_summary`` 一行 → 按
 ``ability`` 分组 → 配合用户提示**点名坏在哪个 ability 的哪个 stage / reason**。
 """
 

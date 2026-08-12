@@ -425,7 +425,7 @@ class GameContext:
 
     @property
     def observe(self):
-        """结构化观测句柄（``设计实现.md §4.4``）。
+        """结构化观测句柄（``设计实现.md §2``）。
 
         永可调用、**永不返回 None**：活跃 run 内返真 ``Observe``，否则返 ``_NullObserve``
         单例（no-op）。ability 用 ``ctx.observe.event("<domain>.<stage>", ability=..., ...)``

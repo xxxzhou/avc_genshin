@@ -89,7 +89,7 @@ class HighLevelApi:
 
     @property
     def observe(self):
-        """结构化观测句柄（``设计实现.md §4.4``），与 ``ctx.observe`` 同源。
+        """结构化观测句柄（``设计实现.md §2``），与 ``ctx.observe`` 同源。
 
         永可调用、永不返回 None：活跃 run 内返真 ``Observe``，否则 ``_NullObserve``。
         ability 取 ``self.g.observe`` 或 ``self.ctx.observe`` 均可。**保留** ``_observe``

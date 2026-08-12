@@ -72,6 +72,11 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
     # ── 1. 截图基础 ──
     _probe("capture", lambda: _capture_info(ctx))
 
+    # ── 1b. 存当前帧到 debug/<run_id>/snapshot.png ——「实机诊断的眼睛」：
+    #        AI/人 Read 这张图即可看到「现在游戏画面长啥样」，不必靠文字转述。
+    #        复用 observe.save_evidence（ctx.capture → save），零额外依赖。
+    _probe("snapshot", lambda: ctx.observe.save_evidence(ctx, "snapshot") or "save_failed")
+
     # ── 2. 截图速率 ──
     def _fps():
         N = 10

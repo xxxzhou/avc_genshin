@@ -62,7 +62,7 @@ class Observe:
     def event(self, kind: str, *, level: str = "info", task: str | None = None, **fields: Any) -> None:
         """记一条事件。自动注入 scene（来自 SharedState）+ ts/run_id（在 logger 注入）。
 
-        节流（opt-in，见 ``设计实现.md §4.4``）—— 事件传以下任一控制标志才启用，否则
+        节流（opt-in，见 ``设计实现.md §2``）—— 事件传以下任一控制标志才启用，否则
         全量落地（保留既有行为，不破坏 runtime/g.* 事件）：
 
         - ``throttle_key="..."``：time-window 模式，同 key 成功/观测事件每 ``_THROTTLE_INTERVAL``
@@ -192,7 +192,7 @@ class _NullObserve:
 
     无 runtime / 无活跃 run 时 ``ctx.observe`` / ``g.observe`` 返回本单例。
     **签名与 ``Observe`` 钉死一致**；调用方永不判空（``ctx.observe`` 永可调用），
-    见 ``设计实现.md §4.4 能力可观测性约定``。
+    见 ``设计实现.md §2 能力可观测性约定``。
     """
 
     _self = None  # 单例锚点

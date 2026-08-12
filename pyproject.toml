@@ -40,6 +40,9 @@ include = ["framework*", "abilities*"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]  # 只收集 tests/；diag/ 是实机脚本（顶层初始化 avc + sys.exit），勿当测试收集
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
