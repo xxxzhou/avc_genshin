@@ -46,10 +46,11 @@ _MOVE_TIMEOUT = 240.0  # 移动超时(秒)
 _STEER_SLEEP_S = 0.1  # rotate_camera_to_target 内部已含 _SETTLE_S 等待，此处仅补短间隔
 _POSITION_RECORD_INTERVAL = 1.0  # 位置记录间隔(秒)
 _JUMP_INTERVAL_S = 2.0  # jump 移动模式周期跳间隔
-# 角度差超过此值时停步闭环转向。2026-08-15 实机：15° 过敏 —— 每次触发停步走
-# rotate_to 慢闭环（px→角度映射不稳定，单次收敛 20-30s），站桩时间远大于偏航损失；
-# 移动中 rotate_camera_to_target（不停步）足以收敛 45° 内偏差（diag_moveto 已证）。
-_REORIENT_THRESHOLD = 45.0
+# 角度差超过此值时停步闭环转向。2026-08-15 实机定论：**停步式 rotate_to 依赖
+# nudge W 同步面朝，角色被地形挡住时 nudge 无效 → 读数不更新 → max_attempts 空转**
+# （+300px×5 实测 Δ≈0°@撞墙位）。走路中面朝自动同步相机，rotate_camera_to_target
+# 可靠（diag_moveto 已证）。故阈值取 90：仅严重反向才停步，其余边走边转。
+_REORIENT_THRESHOLD = 90.0
 _POS_FAIL_STREAK_DEATH_CHECK = 5  # 连续定位失败 N 次后查死亡面板（全队阵亡黑屏→小地图必失败）
 
 
@@ -199,7 +200,7 @@ class Navigator:
                         if current_angle is not None:
                             self._camera.rotate_to(
                                 (current_angle + 180.0) % 360.0,
-                                max_diff=10.0, max_attempts=15,
+                                max_diff=15.0, max_attempts=4,
                             )
                         try:
                             self.ctx.ic.keyDown(KeyCode.w)
@@ -232,10 +233,14 @@ class Navigator:
                             self.ctx.press(KeyCode.s, hold=1.0)
                         except Exception:
                             pass
-                        # 反向转向（target + 180）
+                        # 反向转向（target + 180）：轻量尝试，失败不阻塞
+                        # （rotate_to 靠 nudge W 同步面朝，被挡时无效——随后边走边转修正）
                         current_angle = self._camera.get_orientation()
                         if current_angle is not None:
-                            self._camera.rotate_to((current_angle + 180.0) % 360.0, max_diff=10.0)
+                            self._camera.rotate_to(
+                                (current_angle + 180.0) % 360.0,
+                                max_diff=15.0, max_attempts=4,
+                            )
                         try:
                             self.ctx.ic.keyDown(KeyCode.w)
                         except Exception:

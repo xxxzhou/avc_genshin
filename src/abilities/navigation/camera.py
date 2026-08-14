@@ -57,6 +57,13 @@ _ROTATE_CONTROL_RATIOS = [
 # 朝向连续读取失败达此次数 → 发 cam.heading_fail（诊断「盲走」：罗盘读不到仍导航）
 _HEADING_FAIL_THRESHOLD = 5
 
+# 失速检测（2026-08-15 实机：角色被地形挡住时 nudge W 无效，面朝读数不变，
+# +300px×5 → Δ≈0°，max_attempts 空转 30s+ 拖死走路段）：连续 N 轮大位移后
+# 面朝变化 < 此角度 → 判定卡住，快速中止（reason=stalled）交给走路段
+# rotate_camera_to_target（移动中面朝自动同步，diag_moveto 已证可靠）收敛。
+_STALL_DELTA_DEG = 1.5
+_STALL_LIMIT = 2
+
 
 class CameraControl:
     """角色朝向（面朝）检测与旋转控制。
@@ -134,13 +141,7 @@ class CameraControl:
         痛点②：不收敛（reason=max_attempts）或读不到朝向（read_fail）= 转向失败 → 偏航/卡地形。
         """
         ob = self.ctx.observe
-        # 光标回中：相对移动会在屏幕坐标上累加，光标若停在边缘（此前地图拖拽/旋转
-        # 残留），相对位移被屏幕边界裁剪 → 实际旋转量远小于期望 → 不收敛。
-        try:
-            sx, sy = self.ctx.to_screen(960, 540)
-            self.ctx.ic.moveTo(int(sx), int(sy))
-        except Exception:
-            pass
+        self._center_cursor()
         # 入口：读当前朝向算初始 diff + 确定 max_attempts
         current = self._read_stable()
         if current is None:
@@ -163,6 +164,7 @@ class CameraControl:
         px_per_deg = _PX_PER_DEG
         prev_angle: float | None = None
         prev_move: int | None = None
+        stalled = 0
         for _ in range(max_attempts):
             used += 1
             current = self._read_stable()
@@ -170,14 +172,26 @@ class CameraControl:
                 ob.event("cam.rotate", ability="cam", phase="act", ok=False,
                          attempts=used, max_attempts=max_attempts, reason="read_fail")
                 return False
-            # 增益在线修正：上一步实测（方向正确且角度变化显著才采信）
+            diff = self._angle_diff(current, target_angle)
             if prev_angle is not None and prev_move is not None and abs(prev_move) >= 100:
                 actual = self._angle_diff(current, prev_angle)
-                if actual * prev_move > 0 and abs(actual) > 2.0:  # 方向对（+px→+角）
+                if actual * prev_move > 0 and abs(actual) > 2.0:
+                    # 增益在线修正：方向对且角度变化显著才采信（有进展 → 失速清零）
                     measured = abs(prev_move) / abs(actual)
                     px_per_deg = max(8.0, min(60.0, 0.5 * px_per_deg + 0.5 * measured))
+                    stalled = 0
+                elif abs(actual) < _STALL_DELTA_DEG and abs(diff) >= max_diff:
+                    # 失速：大位移后面朝纹丝不动且未收敛 → nudge 被地形挡死，
+                    # 再转也是空转；stalled 连续 _STALL_LIMIT 轮 → 快速中止
+                    stalled += 1
+                    if stalled >= _STALL_LIMIT:
+                        ob.event("cam.rotate", ability="cam", phase="act", ok=False,
+                                 attempts=used, max_attempts=max_attempts,
+                                 diff=round(diff, 1), reason="stalled")
+                        return False
+                else:
+                    stalled = 0
             prev_angle = current
-            diff = self._angle_diff(current, target_angle)
             if abs(diff) < max_diff:
                 ob.event("cam.rotate", ability="cam", phase="act", ok=True,
                          attempts=used, max_attempts=max_attempts,
@@ -188,6 +202,7 @@ class CameraControl:
             if move_x == 0:
                 move_x = -_MAX_MOVE_PX if diff > 0 else _MAX_MOVE_PX
             prev_move = move_x
+            self._center_cursor()  # 光标每轮回中：防相对位移被屏幕边缘裁剪（见下）
             self.ctx.move_by_rel(move_x, 0)
             time.sleep(_SETTLE_S)  # 等相机旋转结束（惯性 ~1.5s）
             self._nudge_sync()     # 轻推 W 同步面朝=相机偏航
@@ -202,6 +217,16 @@ class CameraControl:
                  attempts=used, max_attempts=max_attempts,
                  reason="converged" if converged else "max_attempts")
         return converged
+
+    def _center_cursor(self) -> None:
+        """光标回中：相对移动会在屏幕坐标上累加，光标若停在边缘（此前地图拖拽/
+        旋转残留，或多轮旋转+nudge 漂移累计），相对位移被屏幕边界裁剪 → 实际
+        旋转量远小于期望 → 被误判失速/不收敛。rotate_to 每轮 move 前调用。"""
+        try:
+            sx, sy = self.ctx.to_screen(960, 540)
+            self.ctx.ic.moveTo(int(sx), int(sy))
+        except Exception:
+            pass
 
     def _read_stable(self, tries: int = 3) -> float | None:
         """连续读箭头朝向取中位数，滤掉噪声（单次读数会跳）。"""

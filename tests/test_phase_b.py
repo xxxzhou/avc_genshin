@@ -346,6 +346,73 @@ class TestCameraControl:
         assert CameraControl._angle_diff(10, 350) == 20.0
 
 
+class TestRotateToClosedLoop:
+    """rotate_to 闭环逻辑（mock 朝向传感器 + move_by_rel；不依赖 avc/游戏）。"""
+
+    def _make_cam(self, readings):
+        """构造 CameraControl：_read_stable 依次返回 readings，nudge 打掉。"""
+        from abilities.navigation.camera import CameraControl
+
+        ctx = MagicMock()
+        seq = list(readings)
+
+        def fake_read(tries: int = 3):
+            if seq:
+                return seq.pop(0)
+            return None
+
+        cam = CameraControl.__new__(CameraControl)
+        cam.ctx = ctx
+        cam._heading_none_streak = 0
+        cam._read_stable = fake_read
+        cam._nudge_sync = lambda: None
+        return cam, ctx
+
+    def test_converge(self):
+        """面朝逐步逼近目标 → converged=True。"""
+        from abilities.navigation.camera import CameraControl
+
+        cam, ctx = self._make_cam([100, 80, 60, 40, 20, 5])
+        assert cam.rotate_to(0, max_diff=10.0) is True
+        reasons = [c.kwargs.get("reason") for c in ctx.observe.event.call_args_list]
+        assert "converged" in reasons
+
+    def test_stalled_aborts_fast(self):
+        """被地形挡住：面朝永不变 → 连续失速 2 轮快速中止（不耗尽 max_attempts）。"""
+        from abilities.navigation.camera import CameraControl
+
+        cam, ctx = self._make_cam([120, 120, 120, 120, 120, 120, 120, 120])
+        assert cam.rotate_to(0, max_diff=10.0, max_attempts=15) is False
+        stall_events = [c for c in ctx.observe.event.call_args_list
+                        if c.kwargs.get("reason") == "stalled"]
+        assert stall_events, "应发出 reason=stalled 事件"
+        # 快速中止：第 3 轮读数即返回（第 1 轮建立基线，第 2/3 轮判失速）
+        assert stall_events[0].kwargs["attempts"] == 3
+        # 空转被截断：实际鼠标移动只有 2 次，而非耗尽 15 轮
+        assert ctx.move_by_rel.call_count == 2
+
+    def test_stall_not_triggered_when_progressing(self):
+        """面朝在变（>1.5°/轮）→ 不误判失速，走到收敛。"""
+        cam, ctx = self._make_cam([100, 70, 40, 12, 5])
+        assert cam.rotate_to(0, max_diff=10.0, max_attempts=8) is True
+        assert not any(c.kwargs.get("reason") == "stalled"
+                       for c in ctx.observe.event.call_args_list)
+
+    def test_stall_counter_resets_on_progress(self):
+        """失速→有进展→失速：counter 应被进展轮清零，不累积误判中止。"""
+        # 读数：120(入口) 120(死) 90(进展) 90(死) 40(进展) 12(进展) 5(收敛)
+        cam, ctx = self._make_cam([120, 120, 90, 90, 40, 12, 5])
+        assert cam.rotate_to(0, max_diff=10.0, max_attempts=8) is True
+        assert not any(c.kwargs.get("reason") == "stalled"
+                       for c in ctx.observe.event.call_args_list)
+
+    def test_read_fail(self):
+        """入口读不到朝向 → read_fail。"""
+        cam, ctx = self._make_cam([None])
+        assert cam.rotate_to(0) is False
+        assert ctx.observe.event.call_args_list[-1].kwargs.get("reason") == "read_fail"
+
+
 # ── avc IOrientationDetector 忠实性对比（需 avc + avc_opencv 插件）──
 
 
