@@ -46,7 +46,11 @@ _MOVE_TIMEOUT = 240.0  # 移动超时(秒)
 _STEER_SLEEP_S = 0.1  # rotate_camera_to_target 内部已含 _SETTLE_S 等待，此处仅补短间隔
 _POSITION_RECORD_INTERVAL = 1.0  # 位置记录间隔(秒)
 _JUMP_INTERVAL_S = 2.0  # jump 移动模式周期跳间隔
-_REORIENT_THRESHOLD = 15.0  # 角度差超过此值时停步闭环转向（避免移动中转向不足导致偏航/卡地形）
+# 角度差超过此值时停步闭环转向。2026-08-15 实机：15° 过敏 —— 每次触发停步走
+# rotate_to 慢闭环（px→角度映射不稳定，单次收敛 20-30s），站桩时间远大于偏航损失；
+# 移动中 rotate_camera_to_target（不停步）足以收敛 45° 内偏差（diag_moveto 已证）。
+_REORIENT_THRESHOLD = 45.0
+_POS_FAIL_STREAK_DEATH_CHECK = 5  # 连续定位失败 N 次后查死亡面板（全队阵亡黑屏→小地图必失败）
 
 
 class Navigator:
@@ -88,6 +92,7 @@ class Navigator:
         start_time = time.monotonic()
         ob = self.ctx.observe
         last_record_time = start_time
+        pos_fail_streak = 0
         too_far_count = 0
         sprint = False  # run/dash 冲刺（finally 释放用）
 
@@ -99,17 +104,17 @@ class Navigator:
             is_jump = mode == "jump"  # 周期跳
             last_jump = start_time
 
-            # 初始转向：用 rotate_to 闭环收敛到目标朝向（避免大角度差时边走边转向
-            # 导致角色在错误方向越走越远）。max_diff=5° 足够小，后续移动循环里
-            # rotate_camera_to_target 会继续微调。
+            # 初始预转向：仅**严重反向**（>90°）才停步闭环转——2026-08-15 实机：
+            # rotate_to 慢闭环（px→角度映射不稳，单次 20-30s）站桩代价远大于走弯路；
+            # 45-90° 偏差由移动中 rotate_camera_to_target 边走边收敛（diag_moveto 已证）。
             start_pos = self._position_getter.get_position()
             if start_pos is not None:
                 target_angle = CameraControl.target_orientation(start_pos, (waypoint.x, waypoint.y))
                 current_angle = self._camera.get_orientation()
                 if current_angle is not None:
                     angle_diff = self._camera._angle_diff(current_angle, target_angle)
-                    if abs(angle_diff) > 30:  # 大角度差才预转向
-                        self._camera.rotate_to(target_angle, max_diff=5.0)
+                    if abs(angle_diff) > 90:  # 严重反向才预转向
+                        self._camera.rotate_to(target_angle, max_diff=10.0, max_attempts=8)
 
             # fly: 先跳起进入滑翔（实机验证空格键进入滑翔）
             if mode == "fly":
@@ -138,15 +143,32 @@ class Navigator:
             no_progress_count = 0            # 距上次创新低的步数
             _NO_PROGRESS_LIMIT = 15          # 15 步没创新低 = 卡地形，反向挣脱
             while time.monotonic() - start_time < timeout:
+                # 取消检查点：GuardRail auto_kill / F9 / 超时后立即退出
+                # （2026-08-14 实机教训：不检查则 pos_fail 死循环空转到 timeout）
+                self.ctx.check_cancel()
+
                 # 获取当前位置
                 position = self._position_getter.get_position()
                 if position is None:
+                    pos_fail_streak += 1
+                    # 死亡检测：全队阵亡黑屏 → 小地图匹配必失败。连续失败时查复苏面板
+                    # （ROI 限定按钮区，快）；死了 → 点复苏复活并中止本段（痛点③）
+                    if pos_fail_streak >= _POS_FAIL_STREAK_DEATH_CHECK:
+                        if self._check_party_dead():
+                            self._revive_party()
+                            from framework.errors import TaskError
+
+                            raise TaskError(
+                                "走路段全队阵亡：已点复苏复活（回到最近神像），任务中止重跑"
+                            )
                     # 定位缺失（SIFT 未中）：节流观察，不 abort（可能瞬时）；持续缺失→末轮 timeout 兜底
                     ob.event("nav.step", ability="nav", phase="observe",
                              target=target_xy, reason="pos_fail", mode=mode,
+                             pos_fail_streak=pos_fail_streak,
                              throttle_key="nav.step")
                     time.sleep(0.1)
                     continue
+                pos_fail_streak = 0
 
                 # 计算距离
                 dist = CameraControl.distance(position, (waypoint.x, waypoint.y))
@@ -316,11 +338,11 @@ class Navigator:
                         # nudge_sync 会推动角色前进，位置漂移后 target_angle 变化，
                         # 故 rotate_to 完成后须重新读位置算 target_angle，
                         # 若仍 > REORIENT 则继续转向（而非回主循环触发又一轮停步-转向）
-                        for _reorient in range(10):  # 最多 10 轮闭环
+                        for _reorient in range(3):  # 最多 3 轮闭环（2026-08-15：10 轮站桩过久）
                             if _reorient == 0:
                                 prev_diff = 360.0  # 收敛趋势基线（首次必不触发"没收窄"）
-                            # 显式 max_attempts=15（subagent 2026-08-12 报告 P2：默认 5 不够）
-                            self._camera.rotate_to(target_angle, max_diff=5.0, max_attempts=15)
+                            # max_attempts=8（2026-08-12 P2：默认 5 不够；15 过慢）
+                            self._camera.rotate_to(target_angle, max_diff=5.0, max_attempts=8)
                             # 重新读位置算 target_angle
                             new_pos = self._position_getter.get_position()
                             if new_pos is not None:
@@ -370,6 +392,38 @@ class Navigator:
     def get_position(self) -> tuple[float, float] | None:
         """获取当前玩家位置。"""
         return self._position_getter.get_position()
+
+    # ── 死亡检测 + 复活（走路段；战斗段由 fighter.recover_on_death 负责）──
+
+    def _check_party_dead(self) -> bool:
+        """查全队阵亡「复苏」面板（ROI 限定按钮区，快）。"""
+        from abilities.game_state import RESURRECTION_ROI, has_resurrection_icon
+
+        frame = self.ctx.capture()
+        if frame is None:
+            return False
+        return has_resurrection_icon(self.ctx, frame, roi=RESURRECTION_ROI)
+
+    def _revive_party(self) -> None:
+        """点「复苏」按钮复活全队（回最近七天神像，满状态）。"""
+        from abilities import vision_utils as vu
+        from abilities.game_state import RESURRECTION_ROI
+
+        ob = self.ctx.observe
+        self.ctx.release_all_keys()
+        rect = vu.find_template(
+            self.ctx, "eat/Resurrection.png", threshold=0.8, roi=RESURRECTION_ROI
+        )
+        if rect is None:
+            ob.event("nav.revive", ability="nav", phase="act", ok=False,
+                     reason="button_not_found")
+            return
+        self.g.click(rect.cx, rect.cy)
+        # 复苏 → 黑屏加载 → 回到神像主界面
+        revived = self.g.wait_main_ui(timeout=30)
+        ob.event("nav.revive", ability="nav", phase="act", ok=revived,
+                 reason=None if revived else "wait_main_ui_timeout",
+                 click=(round(rect.cx), round(rect.cy)))
 
     def get_orientation(self) -> float | None:
         """获取当前摄像机朝向（度）。"""

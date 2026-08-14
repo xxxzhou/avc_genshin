@@ -134,6 +134,13 @@ class CameraControl:
         痛点②：不收敛（reason=max_attempts）或读不到朝向（read_fail）= 转向失败 → 偏航/卡地形。
         """
         ob = self.ctx.observe
+        # 光标回中：相对移动会在屏幕坐标上累加，光标若停在边缘（此前地图拖拽/旋转
+        # 残留），相对位移被屏幕边界裁剪 → 实际旋转量远小于期望 → 不收敛。
+        try:
+            sx, sy = self.ctx.to_screen(960, 540)
+            self.ctx.ic.moveTo(int(sx), int(sy))
+        except Exception:
+            pass
         # 入口：读当前朝向算初始 diff + 确定 max_attempts
         current = self._read_stable()
         if current is None:
@@ -150,6 +157,12 @@ class CameraControl:
                  target=target_angle, diff=round(initial_diff, 1), max_attempts=max_attempts)
 
         used = 0
+        # 自适应增益：px→角度映射今天实测不稳定（同 +600px 在 +4°~+131° 间波动，
+        # 2026-08-15 diag_rot_speed；两份历史标定 22.6 vs 9.9 px/° 互相矛盾）。
+        # 每步实测 Δ角/px 在线修正估计，夹在 [8, 60] 防失控。
+        px_per_deg = _PX_PER_DEG
+        prev_angle: float | None = None
+        prev_move: int | None = None
         for _ in range(max_attempts):
             used += 1
             current = self._read_stable()
@@ -157,16 +170,24 @@ class CameraControl:
                 ob.event("cam.rotate", ability="cam", phase="act", ok=False,
                          attempts=used, max_attempts=max_attempts, reason="read_fail")
                 return False
+            # 增益在线修正：上一步实测（方向正确且角度变化显著才采信）
+            if prev_angle is not None and prev_move is not None and abs(prev_move) >= 100:
+                actual = self._angle_diff(current, prev_angle)
+                if actual * prev_move > 0 and abs(actual) > 2.0:  # 方向对（+px→+角）
+                    measured = abs(prev_move) / abs(actual)
+                    px_per_deg = max(8.0, min(60.0, 0.5 * px_per_deg + 0.5 * measured))
+            prev_angle = current
             diff = self._angle_diff(current, target_angle)
             if abs(diff) < max_diff:
                 ob.event("cam.rotate", ability="cam", phase="act", ok=True,
                          attempts=used, max_attempts=max_attempts,
                          diff_final=round(diff, 1), reason="converged")
                 return True
-            move_x = int(round(-diff * _PX_PER_DEG))  # +move_x→面朝增（facecal3），须反向驱动 diff
+            move_x = int(round(-diff * px_per_deg))
             move_x = max(-_MAX_MOVE_PX, min(_MAX_MOVE_PX, move_x))
             if move_x == 0:
                 move_x = -_MAX_MOVE_PX if diff > 0 else _MAX_MOVE_PX
+            prev_move = move_x
             self.ctx.move_by_rel(move_x, 0)
             time.sleep(_SETTLE_S)  # 等相机旋转结束（惯性 ~1.5s）
             self._nudge_sync()     # 轻推 W 同步面朝=相机偏航

@@ -1102,24 +1102,50 @@ class TestMapControllerDrag:
         return ctx
 
     def test_drag_sequence_and_total_distance(self):
-        """拖 1000 北向 game 单位（zoom=1）→ 屏幕 Y 移动，终点 Y ≈ 540+3570。"""
+        """拖 1000 北向 game 单位（zoom=1）→ 多手势分段，累计屏幕 Y 位移 ≈ 3570。
+
+        2026-08-14：单手势上限 400px（超长一次手势光标顶死屏幕角，视口甩进海洋），
+        3570px → 9 手势；每手势从起点 (960,540) 重新开始，位移累加。
+        """
         mc = _mc(self._ctx())
         mc.drag_map(1000.0, 0.0, 1.0)  # north_delta=1000, west_delta=0
         ic = mc.ctx.ic
-        # 第一个 moveTo 是起点，后续 moveTo 是每步目标
         moves = ic.moveTo.call_args_list
-        assert len(moves) >= 6  # 起点 + 5~60 步
-        # 起点
-        assert moves[0].args == (960, 540)
-        # 2026-08-08 实机标定：北向 → 屏幕 Y 偏移 = MapScaleFactor(3.57)*1000/1.0 = 3570
+        gestures = ic.mouseDown.call_count
+        # 2026-08-08 实机标定：北向 → 屏幕 Y 总位移 = MapScaleFactor(3.57)*1000/1.0 = 3570
         # 3.57 = 3.0*(200/168)（drag(+200)@zoom3.85 实测西轴移 168 单位，scale 偏低校准）
-        final_y = moves[-1].args[1]
-        assert abs(final_y - 4110) <= 25
-        # X 全程 ≈ 960（西向增量 0）
-        for m in moves:
-            assert m.args[0] == 960
-        ic.mouseDown.assert_called_once_with("LB")
-        ic.mouseUp.assert_called_once_with("LB")
+        assert gestures == 9  # ceil(3570/400)，每手势 ≤400px
+        # 手势间用"回到起点"的 moveTo 分界（Y=540 且是手势首步）
+        total_y = 0
+        # 手势间用"回到起点"的 moveTo 分界（Y=540 且是手势首步）
+        seg_starts = [i for i, m in enumerate(moves) if m.args == (960, 540)]
+        assert len(seg_starts) == gestures
+        bounds = seg_starts + [len(moves)]
+        for a, b in zip(bounds, bounds[1:]):
+            seg = moves[a + 1 : b]
+            assert len(seg) >= 5  # 每手势 ≥5 步
+            seg_y = seg[-1].args[1] - 540
+            assert seg_y <= 400 + 25  # 单手势位移 ≤400px
+            total_y += seg_y
+            # X 全程 ≈ 960（西向增量 0）
+            for m in seg:
+                assert m.args[0] == 960
+        assert abs(total_y - 3570) <= 60  # 累计位移 ≈ 总期望
+        # 手势 mouseUp + 开头 1 次防御性清态 mouseUp（残留按住态会吞手势）
+        assert ic.mouseUp.call_count == gestures + 1
+
+    def test_drag_far_splits_into_gestures(self):
+        """超远距（一次手势远超屏幕）→ 手势数 = ceil(px/400)，不顶屏幕边。"""
+        mc = _mc(self._ctx())
+        mc.drag_map(2000.0, 8000.0, 4.0)  # 北2000 西8000 → px=(7140,1785)，斜距>7000
+        ic = mc.ctx.ic
+        gestures = ic.mouseDown.call_count
+        assert gestures >= 18  # hypot(7140,1785)/400 ≈ 18.4
+        # 所有 moveTo 都在屏幕安全区（不顶死角落）
+        for m in ic.moveTo.call_args_list:
+            x, y = m.args
+            assert 0 <= x <= 1920 and 0 <= y <= 1080
+            assert not (x <= 5 and y <= 5)  # 不出现顶死 (0,0)
 
     def test_small_distance_no_drag(self):
         """偏移太小（<1px）→ 直接返回，不产生鼠标动作。"""
@@ -1325,6 +1351,7 @@ class TestNavigateMapToTarget:
         置 0 直接走到"首轮失败即中止"，避免 mock 需喂满 12 次 None。
         """
         mc = MagicMock()
+        mc.measure_zoom_level.return_value = 6.0  # 已在最大档，导航前不再缩放
         tp = self._teleporter(monkeypatch, mc)
         monkeypatch.setattr("abilities.navigation.tp._MAP_RESET_LIMIT", 0)
         tp._pg.get_position_from_big_map.side_effect = [None, None, None]

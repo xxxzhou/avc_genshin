@@ -25,7 +25,7 @@ from framework.resources import res
 @task(
     name="auto_boss",
     desc="自动讨伐世界首领（40 原粹树脂）：传送到首领→战斗→领奖→循环。boss_name 须有对应路径 JSON。",
-    daemons=["frame", "scene_estimator", "auto_eat"],
+    daemons=["frame", "scene_estimator", "auto_eat", "timeline_snap"],
     requires=["navigation", "fighter"],
     params={
         "boss_name": {

@@ -158,12 +158,33 @@ class PathExecutor:
                          landed=(round(tran_x), round(tran_y)))
             # 行走剩余路径点（move_mode 传给 Navigator：fly 先跳起 / climb 跳过卡死）
             for wp in segment[1:]:
+                # 走路段遇敌：停下打完再走（2026-08-15 实机：穿 boss 区域被围殴
+                # 全队阵亡，站桩转向 ~200s 无反击）。auto_boss 打完继续走剩余路点。
+                self._fight_if_in_combat(seg_idx)
                 ok = navigator.go_to(wp)
                 ob.event("path.segment", ability="path", phase="act",
                          seg=seg_idx, action="walk", move_mode=wp.move_mode,
                          waypoint=(round(wp.x), round(wp.y)), ok=ok,
                          reason=None if ok else "go_to_failed")
                 self._handle_action(wp)
+
+    def _fight_if_in_combat(self, seg_idx: int) -> None:
+        """战斗场景下先清场再走路（对照 BGI Pathing 手动战斗中断处理，简化）。
+
+        场景判定 combat（scene_estimator）即打 ``fight_until_clear``；死亡由
+        fighter.recover_on_death 复活路径兜底。非战斗场景直接返回（零开销一帧截图）。
+        """
+        from framework.scene import Scene
+
+        ob = self.ctx.observe
+        scene = getattr(self.g.scene, "scene", None) if self.g.scene else None
+        if scene is not Scene.COMBAT:
+            return
+        ob.event("path.fight", ability="path", phase="decide", seg=seg_idx,
+                 ok=True, reason="combat_during_walk")
+        cleared = self.g.fight_until_clear(timeout=120)
+        ob.event("path.fight", ability="path", phase="act", seg=seg_idx,
+                 ok=cleared, reason=None if cleared else "timeout")
 
     def _handle_action(self, wp: Waypoint) -> None:
         """路径点 action 处理（对照 BGI PathExecutor Handler，简化骨架）。

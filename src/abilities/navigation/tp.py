@@ -170,9 +170,12 @@ _TELEPORT_WAIT_MAIN_UI_TIMEOUT = 60.0  # 传送完成后等待主界面的超时
 _MAX_NAV_ITER = 30  # 拖拽循环最大迭代数（BGI MaxIterations）
 _MAX_NAV_FAILS = 3  # 连续 SIFT 定位失败上限 → 触发地图复位
 _MAP_RESET_LIMIT = 3  # 地图复位（M 关/开图）上限，超过仍失败 → 中止
+_NAV_NO_PROGRESS_LIMIT = 5  # 拖拽后 dist 连续 N 轮不降 → 复位地图视图（卡坏状态）
 _MOVE_TOLERANCE = 200.0  # 目标进入容差即停止拖拽（game 单位，BGI Tolerance）
 _MAP_ZOOM_OUT_DISTANCE = 1500.0  # 远距先缩小阈值（game 单位，≈BGI MapZoomOutDistance 1000px@zoom4）
 _TELEPORT_MAX_ZOOM = 6.0  # 最大缩小档（BGI TeleportMaxZoomLevel）
+_TRAVEL_ZOOM_CAP = 5.5  # 导航缩放上限：≥5.7 为全图概览档（无平移余量，勿进）
+_ZOOM_TOL = 0.3  # 缩放达标容差（与 map_ops._ZOOM_TOLERANCE 一致）
 _CONFIRM_WAIT_TIMEOUT = 5.0  # 等待传送按钮出现的兜底超时（秒）
 
 
@@ -193,6 +196,7 @@ class Teleporter:
         self.g = g
         self._db = TpDatabase()
         self._pg = None  # PositionGetter（大图 SIFT 定位 + prev 锚定，懒加载）
+        self._map_open_seed: tuple[float, float] | None = None  # 开图前玩家位置（SIFT seed）
 
     def teleport_to(
         self,
@@ -274,7 +278,12 @@ class Teleporter:
         return target
 
     def _open_map(self) -> None:
-        """打开地图界面（按 M 键）。"""
+        """打开地图界面（按 M 键）。
+
+        开图前先用小地图定位记录玩家位置——开图后地图以玩家为中心，把该位置
+        作为大图 SIFT 的期望中心 seed（避免全图匹配在相似地形上假阳性返回错位
+        置：2026-08-15 实机，玩家 (7,263) 被定位成 (-56,1224)，后续拖拽方向全错）。
+        """
         from avc._core import KeyCode
 
         from framework.scene import Scene
@@ -282,6 +291,16 @@ class Teleporter:
         # 如果已在地图界面，无需操作
         if self.g.scene is not None and self.g.scene.scene is Scene.MAP:
             return
+        # 开图前小地图定位（失败容忍——None 则首轮走全图匹配）
+        self._map_open_seed = None
+        try:
+            if self._pg is None:
+                from abilities.navigation.position import PositionGetter
+
+                self._pg = PositionGetter(self.ctx)
+            self._map_open_seed = self._pg.get_position()
+        except Exception:
+            self._map_open_seed = None
         # 释放所有按键
         self.ctx.release_all_keys()
         # 按 M 打开地图
@@ -341,6 +360,13 @@ class Teleporter:
                  zoom=z0, grounded=grounded, throttle_key="tp.navigate:init")
         frame = self.ctx.capture()
 
+        # 1.5 概览档退出：z≥5.7 时地图进入"整块大陆小于视口"的全图概览模式
+        # （四周黑边，**无平移余量**，任何拖拽无效——地图还会记忆上次视图，任务间
+        # 状态残留）。2026-08-15 实机定论：dist 卡死循环主因。先缩回工作档。
+        if z0 is not None and z0 >= 5.7:
+            mc.set_zoom_level(4.4, frame)
+            frame = self.ctx.capture()
+
         # 2. 切国家 tab（v1 禁用：实机确认 (1760,1020) 按钮本版本点不开国家列表，
         #    且点击会误动地图/可能弹面板拦截后续拖拽。SIFT 定位+拖拽可自行跨区收敛。
         #    留 v2：换按钮位置 + OCR ReplaceDictionary（蒙德→蒙徳）。）
@@ -353,8 +379,15 @@ class Teleporter:
         # 定位连续失败（典型：视口漂到海洋/未开放区）→ M 关/开图复位到玩家位置再继续。
         fail_streak = 0
         reset_count = 0
-        last_center: tuple[float, float] | None = None
+        best_dist: float | None = None  # dist 无进展检测基线
+        no_progress_iters = 0
+        # 首轮期望中心 = 开图前小地图定位的玩家位置（地图以玩家为中心打开；
+        # 无 seed 时 None 走全图匹配）
+        last_center: tuple[float, float] | None = getattr(
+            self, "_map_open_seed", None
+        )
         for i in range(_MAX_NAV_ITER):
+            self.ctx.check_cancel()  # GuardRail/F9 取消即退（同步循环须自查）
             center = self._big_map_position(last_center)
             if center is None:
                 fail_streak += 1
@@ -396,10 +429,44 @@ class Teleporter:
             if dist < _MOVE_TOLERANCE:
                 break  # 目标进入容差 → 去点图标
 
+            # dist 无进展检测：拖拽连续发出但 dist 不降 = 视口卡坏状态
+            # （拖拽被吞/概览档残留/特殊视角），SIFT 却"正常"→ 原复位逻辑
+            # （仅 SIFT 失败触发）永不命中。2026-08-15 实机：视口卡 (-68,1224)
+            # 多轮任务拖拽全无效。→ 主动 M 复位回到玩家中心。
+            if best_dist is None or dist < best_dist - 5.0:
+                best_dist = dist
+                no_progress_iters = 0
+            else:
+                no_progress_iters += 1
+                if no_progress_iters >= _NAV_NO_PROGRESS_LIMIT:
+                    if reset_count >= _MAP_RESET_LIMIT:
+                        ob.event("tp.navigate", ability="tp", phase="decide",
+                                 ok=False, reason="nav_abort_no_progress",
+                                 dist=round(dist), reset_count=reset_count,
+                                 target=target.name)
+                        raise RuntimeError(
+                            f"大图拖拽 {no_progress_iters} 轮无进展且复位 "
+                            f"{reset_count} 次仍无法导航到 {target.name}"
+                        )
+                    reset_count += 1
+                    no_progress_iters = 0
+                    best_dist = None
+                    # 复位后地图回到玩家中心：seed 复用（玩家在图中不动）
+                    last_center = getattr(self, "_map_open_seed", None)
+                    ob.event("tp.navigate", ability="tp", phase="act",
+                             reason="map_reset_no_progress", reset_count=reset_count,
+                             dist=round(dist), throttle_key="tp.navigate:reset")
+                    self._reset_map_view()
+                    frame = self.ctx.capture()
+                    continue
+
             zoom = mc.measure_zoom_level(frame) or 4.0
-            # 远距先缩小（拖拽更快），上限 _TELEPORT_MAX_ZOOM
-            if dist > _MAP_ZOOM_OUT_DISTANCE and zoom < _TELEPORT_MAX_ZOOM:
-                mc.set_zoom_level(min(_TELEPORT_MAX_ZOOM, zoom + 1.5), frame)
+            # 远距按比例缩小（BGI MoveMapToCore：target = cur * dist / 阈值）。
+            # ⚠ 上限 5.5：z≥5.7 进入全图概览模式（大陆小于视口、无平移余量），
+            # 拖拽全部无效（2026-08-15 实机定论）。
+            if dist > _MAP_ZOOM_OUT_DISTANCE and zoom < _TRAVEL_ZOOM_CAP - _ZOOM_TOL:
+                target_zoom = min(_TRAVEL_ZOOM_CAP, zoom * dist / _MAP_ZOOM_OUT_DISTANCE)
+                mc.set_zoom_level(target_zoom, frame)
                 frame = self.ctx.capture()
                 zoom = mc.measure_zoom_level(frame) or zoom
 

@@ -53,6 +53,11 @@ _MAP_DRAG_PIXELS_PER_STEP = 48  # 每步最大像素（BGI MapDragPixelsPerStep�
 _MAP_DRAG_FAST_STEP_RATIO = 0.42  # 快速段步数占比（BGI MapDragFastStepRatio）
 _MAP_DRAG_FAST_DISTANCE_RATIO = 0.85  # 快速段距离占比（BGI MapDragFastDistanceRatio）
 _MAP_DRAG_STEP_MS = 20  # 每步间隔（ms）
+# 单次手势最大拖拽像素。⚠ 2026-08-14 实机诊断（diag_drag_far）：dist=8743 时
+# 一次手势期望拖 9764px，光标顶死屏幕角 (0,0)，视口甩进海洋 → SIFT 连续失败 →
+# tp.navigate 复位后重拖死循环（auto_boss dist=2739 卡点同源）。故按 400px/手势
+# 分段：光标始终在 (960,650)±400 安全区内，多手势累计走完期望位移。
+_MAP_DRAG_MAX_GESTURE_PX = 400
 _DRAG_X_SIGN = 1  # 屏幕水平符号（西向增量→拖右：+西→+x→1）
 _DRAG_Y_SIGN = 1  # 屏幕垂直符号（北向增量→拖下：+北→+y→1）
 _DRAG_DPI_MULT = 0.0  # 已弃用：moveTo 绝对坐标模式下不需要 DPI 乘子（buf_to_scr 由 sc.width/1920 计算）
@@ -62,11 +67,13 @@ _DISPLAY_TP_ZOOM = 4.4  # 传送点图标显示所需 zoom（BGI DisplayTpPointZ
 _TP_ICON_THRESHOLD = 0.65  # 传送点图标匹配阈值（BGI NearbyMapIconTemplateThreshold）
 _MAP_CENTER_X = 960
 _MAP_CENTER_Y = 540
-# 拖拽起点。⚠ 2026-08-08 实机探针定位：**不能用视口中心 (960,540)**——
-# 地图打开时玩家位置标记就在中心，Genshin 拦截从玩家标记上发起的拖拽
-#（calib_drag Δ=0 / 手动拖中心 0.3% vs 非中心 49-64% 像素差）。改到中心下方
-# (960,650)，四方向实测 SIFT 跟踪 ±200-240 单位。避开左上 UI 覆盖区 360×400。
-_MAP_DRAG_START = (960, 650)
+# 拖拽起点。⚠ 2026-08-08 标定 (960,650)；**2026-08-15 实机失效**：该点被玩家
+# 位置标记 hitbox（中心 ~120px 宽、向下延伸到 ~650）拦截——mouseDown 落在标记上
+# 整个手势被吞（像素差 0.2% vs 正常 80%+；当时只有 z6 缩最小档能拖）。改为
+# **按拖拽方向自适应起点**：起点 = 中心往拖拽方向反向偏移 _DRAG_START_BACKOFF，
+# 既避开中心标记 hitbox，又给 ≤400px 手势留足屏幕余量。实测可用起点：
+# (960,780)/(960,450)/(1100,540)/(820,540)/(1500,800) 均 80%+ 像素差。
+_MAP_DRAG_START_BACKOFF = 480  # 起点反向偏移（px；> 手势上限 400 留余量）
 _COUNTRY_BTN_POS = (1760, 1020)  # 右下"当前区域"按钮（BGI Width-160, Height-60）
 _COUNTRY_OCR_ROI = (1280, 0, 640, 1080)  # 国家列表 OCR 区（右 1/3，BGI Width*2/3）
 _SWITCH_AREA_RETRIES = 4  # 国家列表 OCR 重试次数（BGI SwitchAreaCandidateRetryCount）
@@ -208,9 +215,49 @@ class MapController:
         moveTo 用逻辑屏幕像素，buffer→screen 缩放比 = screen_w/buf_w。
         """
         self.ctx.ensure_foreground()  # 拖拽全程 ic 直调，开头保证前台
+        # 防御：若此前进程中断残留"左键按住"态（手势中途被杀），本手势会被整个吞掉。
+        # 开头无条件 mouseUp 一次清态（无按键时是 no-op）。
+        try:
+            self.ctx.ic.mouseUp(self.ctx._MouseButton["left"])
+        except Exception:
+            pass
         zoom_level = zoom_level if zoom_level > 0 else 1.0
-        total_x = _MAP_SCALE_FACTOR * abs(west_delta) / zoom_level  # 西向偏移 → 屏幕水平
-        total_y = _MAP_SCALE_FACTOR * abs(north_delta) / zoom_level  # 北向偏移 → 屏幕垂直
+        # 剩余位移（游戏单位），按手势分段消耗
+        rem_west = float(west_delta)
+        rem_north = float(north_delta)
+        gestures = 0
+        while True:
+            gx = _MAP_SCALE_FACTOR * abs(rem_west) / zoom_level  # 本段西向 → 屏幕水平 px
+            gy = _MAP_SCALE_FACTOR * abs(rem_north) / zoom_level  # 本段北向 → 屏幕垂直 px
+            gdist = math.hypot(gx, gy)
+            if gdist < 1.0:
+                break
+            # 单手势超长 → 只走一部分（cap 在 _MAP_DRAG_MAX_GESTURE_PX），下一手势继续
+            frac = 1.0 if gdist <= _MAP_DRAG_MAX_GESTURE_PX else _MAP_DRAG_MAX_GESTURE_PX / gdist
+            self._drag_gesture(rem_west, rem_north, frac, zoom_level)
+            rem_west *= 1.0 - frac
+            rem_north *= 1.0 - frac
+            gestures += 1
+            if gestures > 60:  # 兜底（60×400px@zoom6 ≈ 4 万游戏单位，跨全图足够）
+                break
+        self.ctx.observe.event(
+            "map.drag", ability="tp", phase="act",
+            gestures=gestures,
+            px=round(_MAP_SCALE_FACTOR * abs(west_delta) / zoom_level),
+            ok=True,
+            throttle_key="map.drag",
+        )
+
+    def _drag_gesture(
+        self, west_delta: float, north_delta: float, frac: float, zoom_level: float
+    ) -> None:
+        """单次拖拽手势：把视口中心移动 frac 比例的 (north_delta, west_delta)。
+
+        mouseDown → 分步 moveTo（快慢曲线）→ mouseUp。一次手势的屏幕位移有
+        上限（光标不能出屏），长位移由 drag_map 分多手势完成。
+        """
+        total_x = _MAP_SCALE_FACTOR * abs(west_delta) * frac / zoom_level
+        total_y = _MAP_SCALE_FACTOR * abs(north_delta) * frac / zoom_level
         dist = math.hypot(total_x, total_y)
         if dist < 1.0:
             return
@@ -227,8 +274,9 @@ class MapController:
         buf_w = 1920  # buffer 宽（1080p）
         buf_to_scr = self.ctx.sc.width() / buf_w if buf_w > 0 else 1.0
 
-        # 起点屏幕坐标
-        sx, sy = _MAP_DRAG_START
+        # 起点屏幕坐标：按拖拽方向自适应（反向偏移，避开中心玩家标记 hitbox）
+        sx = _MAP_CENTER_X - sign_x * _MAP_DRAG_START_BACKOFF if sign_x else _MAP_CENTER_X
+        sy = _MAP_CENTER_Y - sign_y * _MAP_DRAG_START_BACKOFF if sign_y else _MAP_CENTER_Y
         scr_x, scr_y = self.ctx.to_screen(sx, sy)
         ic.moveTo(int(scr_x), int(scr_y))
         ic.mouseDown(btn)
@@ -237,9 +285,9 @@ class MapController:
         cum_mx = 0.0
         cum_my = 0.0
         for i in range(1, steps + 1):
-            frac = self._drag_curve(i, steps)
-            inc = frac - prev_frac
-            prev_frac = frac
+            frac_i = self._drag_curve(i, steps)
+            inc = frac_i - prev_frac
+            prev_frac = frac_i
             cum_mx += sign_x * total_x * inc * buf_to_scr
             cum_my += sign_y * total_y * inc * buf_to_scr
             # 用 moveTo 绝对坐标（而非 moveBy 相对偏移）
@@ -248,6 +296,7 @@ class MapController:
             ic.moveTo(target_x, target_y)
             utils.sleep(_MAP_DRAG_STEP_MS / 1000.0)
         ic.mouseUp(btn)
+        utils.sleep(0.12)  # 手势间短暂停顿，让地图惯性/渲染跟上
 
     @staticmethod
     def _drag_curve(i: int, steps: int) -> float:

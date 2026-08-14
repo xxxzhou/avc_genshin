@@ -156,18 +156,39 @@ class TestCraftCondensedResin:
 
 class TestSereniteaPot:
     def test_enter_pot(self, monkeypatch):
-        """进入尘歌壶：teleport_to + 等主界面。"""
+        """进入尘歌壶：背包流程（B→小道具→壶→放置→F 进入）。
+
+        2026-08-15 重写（v1 teleport_to("尘歌壶") 是设计 bug：壶不在 tp.json）。
+        """
         from abilities import pot as pot_mod
+        from abilities.vision_utils import Rect
+
+        # find_template 第 1 次（壶图标）返回 Rect，后续（MapCloseButton 验证）None
+        calls = {"n": 0}
+
+        def _fake_find(*a, **kw):
+            calls["n"] += 1
+            return Rect(200, 200, 60, 60, 0.9) if calls["n"] == 1 else None
+
+        monkeypatch.setattr(pot_mod, "_wait_template", lambda *a, **kw: True)
+        monkeypatch.setattr(pot_mod.vu, "find_template", _fake_find)
+        monkeypatch.setattr(pot_mod, "_click_template", lambda *a, **kw: True)
+        monkeypatch.setattr(pot_mod, "_find_enter_pot_f", lambda *a, **kw: True)
+        monkeypatch.setattr(pot_mod.time, "sleep", lambda *a: None)
 
         g = _g(wait_main_ui=MagicMock(return_value=True))
         assert pot_mod.enter_serenitea_pot(_ctx(), g) is True
-        g.teleport_to.assert_called_once_with("尘歌壶", map_name="SereniteaPot")
 
-    def test_enter_pot_teleport_fails(self, monkeypatch):
-        """传送异常 → False。"""
+    def test_enter_pot_pot_icon_not_found(self, monkeypatch):
+        """背包里找不到壶图标 → False（并关背包）。"""
         from abilities import pot as pot_mod
 
-        g = _g(teleport_to=MagicMock(side_effect=Exception("传送失败")))
+        monkeypatch.setattr(pot_mod, "_wait_template", lambda *a, **kw: True)
+        monkeypatch.setattr(pot_mod.vu, "find_template", lambda *a, **kw: None)
+        monkeypatch.setattr(pot_mod, "_close_bag", lambda *a, **kw: None)
+        monkeypatch.setattr(pot_mod.time, "sleep", lambda *a: None)
+
+        g = _g(wait_main_ui=MagicMock(return_value=True))
         assert pot_mod.enter_serenitea_pot(_ctx(), g) is False
 
     def test_claim_rewards_found(self, monkeypatch):

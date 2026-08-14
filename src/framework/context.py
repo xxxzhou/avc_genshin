@@ -65,6 +65,9 @@ class GameContext:
 
         self.cfg = cfg or _default_config
         self.window_title = window_title  # 前台检查/激活用（ensure_foreground）
+        # 取消令牌：Runtime.run_callable 注入（无 runtime 时 None = 永不取消）。
+        # 同步长循环（navigator/tp 等 ability）调 check_cancel() 响应 GuardRail/F9 取消。
+        self.token: "CancellationToken | None" = None
         # 拟人化 RNG 与 config 对齐（可复现 / 真随机）
         utils.set_seed(self.cfg.jitter_seed)
 
@@ -297,6 +300,18 @@ class GameContext:
         """保存当前帧到 debug/ 存证。"""
         self.sc.save(path)
 
+    def check_cancel(self) -> None:
+        """同步取消检查点：已取消则抛 CancelledError。
+
+        供 ability 的长同步循环（navigator/tp 等）调用——GuardRail auto_kill /
+        F9 取消后，纯 ``while`` 循环若不检查 token 会一直空转到自身 timeout
+        （2026-08-14 实机：pos.match no_match 死循环 auto_kill@116s 后仍空转 7min）。
+        """
+        if self.token is not None and self.token.cancelled:
+            from framework.errors import CancelledError
+
+            raise CancelledError(self.token.reason or "cancelled")
+
     # ── 输入（拟人化由框架层套用；avc 无 setHumanize）──
 
     def ensure_foreground(self, wait_s: float = 0.2) -> bool:
@@ -466,6 +481,13 @@ class GameContext:
         """
         from avc._core import KeyCode
 
+        # 鼠标键也须释放（2026-08-15 实机教训：任务在手势中被杀 → mouseDown 残留
+        # "按住"态 → 此后大地图所有拖拽手势被吞，dist 卡死循环且地图复位无效）
+        for b in ("left", "right", "middle"):
+            try:
+                self.ic.mouseUp(self._MouseButton[b])
+            except Exception:
+                pass
         for k in (
             KeyCode.w, KeyCode.a, KeyCode.s, KeyCode.d,
             KeyCode.space, KeyCode.shift, KeyCode.ctrl, KeyCode.alt,

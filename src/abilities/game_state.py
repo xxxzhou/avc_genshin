@@ -281,9 +281,23 @@ def has_recovery_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None, _
     return _find_template(ctx, "recovery", frame, _quiet=_quiet)
 
 
-def has_resurrection_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None, _quiet: bool = False) -> bool:
-    """复活提示（Resurrection 图标，BGI ``CheckResurrection``）。"""
-    return _find_template(ctx, "resurrection", frame, _quiet=_quiet)
+def has_resurrection_icon(
+    ctx: "GameContext",
+    frame: "IImageBuffer | None" = None,
+    _quiet: bool = False,
+    roi: tuple[int, int, int, int] | None = None,
+) -> bool:
+    """复活提示（全队阵亡「复苏」按钮，BGI ``CheckResurrection``）。
+
+    模板 = 复苏按钮整块（2026-08-14 实机从死亡面板裁剪；原 BGI 17×16 小图标
+    实机不命中）。热轮询可传 ``roi``（按钮固定在底部中央 ≈(774,950,410,64)）
+    加速。死亡面板样本见 ``debug/cron_watch.png`` @2026-08-14。
+    """
+    return _find_template(ctx, "resurrection", frame, roi=roi, _quiet=_quiet)
+
+
+# 复苏按钮 ROI（1080p；实机 2026-08-14 标定，含边距）
+RESURRECTION_ROI = (760, 940, 440, 80)
 
 
 def has_chest_f_icon(ctx: "GameContext", frame: "IImageBuffer | None" = None) -> bool:

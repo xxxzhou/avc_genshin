@@ -170,6 +170,9 @@ class Runtime:
 
         self._guard = GuardRail(token, observe, self.ctx)
         observe.subscribe(self._guard.on_event)
+        # 取消令牌注入 ctx：ability 同步长循环调 ctx.check_cancel() 响应取消
+        # （GuardRail auto_kill / F9 / 超时；2026-08-14 实机 pos.match 死循环教训）
+        self.ctx.token = token
         self._notify_task = task_name
         notify("task_start", task=task_name)
 
@@ -246,6 +249,7 @@ class Runtime:
             self.ctx.release_all_keys()
         except Exception:
             pass
+        self.ctx.token = None  # 取消令牌随 run 结束失效
         try:
             self.ctx.close()
         except Exception:

@@ -13,7 +13,7 @@ from framework.errors import TaskError
 @task(
     name="enter_pot",
     desc="进入尘歌壶并领取奖励：传送进入→找阿圆→领好感+宝钱→退出。v1 简化版。",
-    daemons=["frame", "scene_estimator", "auto_skip", "auto_talk"],
+    daemons=["frame", "scene_estimator", "auto_skip", "auto_talk", "timeline_snap"],
     requires=["navigation"],
     tags=["p1", "daily"],
 )
