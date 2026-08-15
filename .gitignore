@@ -48,3 +48,5 @@ tests/fixtures/web/**
 .claude/
 /debug_*.png
 death_regions/
+diag/*.txt
+diag/*.json
