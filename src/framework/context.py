@@ -231,6 +231,17 @@ class GameContext:
                                        reason="source_player_bad_size",
                                        w=self._shot_buf.width, h=self._shot_buf.height)
                     from_player = False
+                elif not self._player_frame_sane(self._shot_buf):
+                    # ⚠ 格式守卫（2026-08-15 实机 P0，r_20260815_090231）：SourcePlayer
+                    # 还会回读**尺寸正常但格式损坏**的帧（imageType/rowPitch/bufferSize
+                    # 异常）→ avc matchTemplate 入口断言 (depth==CV_8U||CV_32F)&&dims<=2
+                    # 崩溃（terminate，无法 catch）。字节完整性校验失败 → 走 sc 回退。
+                    self.observe.event("capture.bad_frame", ability="capture",
+                                       phase="observe", ok=False,
+                                       reason="source_player_bad_format",
+                                       imgtype=self._shot_buf.imageType,
+                                       row_pitch=self._shot_buf.rowPitch)
+                    from_player = False
                 else:
                     buf = self._shot_buf
                     from_player = True
@@ -274,6 +285,25 @@ class GameContext:
         return buf
 
     # ── 帧冻结守卫（capture 健壮性，2026-08-15 实机）──
+
+    @staticmethod
+    def _player_frame_sane(buf: IImageBuffer) -> bool:
+        """SourcePlayer 帧格式完整性校验（廉价，无拷贝）。
+
+        正常帧（实机 2026-08-15 标定）：imageType=rgba8(4)、rowPitch=width*4、
+        bufferSize()=width*height*4。任一异常视为坏帧（GPU 回读损坏）。
+        校验失败不抛异常（属性读取失败也判坏帧，交由 sc 回退兜底）。
+        """
+        try:
+            if buf.imageType != 4:  # rgba8（SourcePlayer 输出格式，实机标定）
+                return False
+            if buf.rowPitch != buf.width * 4:
+                return False
+            if buf.bufferSize() < buf.width * buf.height * 4:
+                return False
+            return True
+        except Exception:
+            return False
 
     def _capture_sc(self, raw: bool = False) -> IImageBuffer | None:
         """IScreenCapture 取一帧并归一化（裁边框+缩放到目标分辨率）。

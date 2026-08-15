@@ -29,12 +29,18 @@ class _FakeCrop:
 
 
 class _FakeBuf:
-    """伪 IImageBuffer：width/height + 帧内容标记（供 crop→to_bytes 指纹）。"""
+    """伪 IImageBuffer：width/height + 帧内容标记（供 crop→to_bytes 指纹）+ 格式属性。"""
 
     def __init__(self, content: int, width: int = 1920, height: int = 1080):
         self.content = content
         self.width = width
         self.height = height
+        # 格式守卫属性（正常 SourcePlayer 帧：rgba8、rowPitch=w*4、bufferSize=w*h*4）
+        self.imageType = 4
+        self.rowPitch = width * 4
+
+    def bufferSize(self) -> int:
+        return self.width * self.height * 4
 
 
 class _FakeImage:
@@ -58,6 +64,8 @@ def _mk_ctx(frame_content: int = 1):
             self._frame_change_t = time.monotonic()
             self._stale_reported = False
             self._player = None
+            self._border_left = 0
+            self._border_top = 0
 
         @property
         def observe(self):
@@ -124,6 +132,74 @@ class TestCaptureFallback:
         ctx._capture_sc = lambda raw=False: pytest.fail("不应走 sc 回退")
         ctx._player_frame_stale = lambda: False
         assert GameContext.capture(ctx) is ctx._shot_buf
+
+
+# ── 1.5 帧格式守卫（2026-08-15 实机 r_20260815_090231：坏格式帧 → matchTemplate 入口断言崩）──
+
+
+class TestPlayerFrameSane:
+    def _ctx_with_player(self, buf):
+        from framework.context import GameContext
+
+        ctx = _mk_ctx()
+        sr = MagicMock()
+        sr.screenShot.return_value = True
+        player = MagicMock()
+        player.getSurfaceRender.return_value = sr
+        ctx._player = player
+        ctx._shot_buf = buf
+        ctx._player_frame_stale = lambda: False
+        return ctx
+
+    def test_sane_frame_passes(self):
+        from framework.context import GameContext
+
+        ctx = self._ctx_with_player(_FakeBuf(1))
+        ctx._capture_sc = lambda raw=False: pytest.fail("不应走 sc 回退")
+        assert GameContext.capture(ctx) is ctx._shot_buf
+
+    def test_bad_image_type_falls_back(self):
+        from framework.context import GameContext
+
+        buf = _FakeBuf(1)
+        buf.imageType = 10  # rgba32f 等非 rgba8 → GPU 回读格式损坏
+        ctx = self._ctx_with_player(buf)
+        sentinel = object()
+        ctx._capture_sc = lambda raw=False: sentinel
+        assert GameContext.capture(ctx) is sentinel
+        evs = [c for c in ctx.observe.event.call_args_list
+               if c.args[0] == "capture.bad_frame"]
+        assert evs and evs[0].kwargs.get("reason") == "source_player_bad_format"
+
+    def test_bad_row_pitch_falls_back(self):
+        from framework.context import GameContext
+
+        buf = _FakeBuf(1)
+        buf.rowPitch = 0  # dims/pitch 损坏
+        ctx = self._ctx_with_player(buf)
+        sentinel = object()
+        ctx._capture_sc = lambda raw=False: sentinel
+        assert GameContext.capture(ctx) is sentinel
+
+    def test_short_buffer_falls_back(self):
+        from framework.context import GameContext
+
+        buf = _FakeBuf(1)
+        buf.bufferSize = lambda: 123  # 字节数不足 → 内容损坏
+        ctx = self._ctx_with_player(buf)
+        sentinel = object()
+        ctx._capture_sc = lambda raw=False: sentinel
+        assert GameContext.capture(ctx) is sentinel
+
+    def test_attribute_error_treated_as_bad(self):
+        from framework.context import GameContext
+
+        buf = _FakeBuf(1)
+        buf.imageType = property(lambda self: (_ for _ in ()).throw(RuntimeError("x")))
+        ctx = self._ctx_with_player(buf)
+        sentinel = object()
+        ctx._capture_sc = lambda raw=False: sentinel
+        assert GameContext.capture(ctx) is sentinel
 
 
 # ── 2. teleport wait_main_ui 超时归因 ──
