@@ -13,7 +13,7 @@ from framework.errors import TaskError
 @task(
     name="craft_resin",
     desc="合成浓缩树脂：走合成台路径→进入合成→选浓缩树脂→确认合成。country 指定合成台所在国家。",
-    daemons=["frame", "scene_estimator", "auto_eat", "timeline_snap"],
+    daemons=["frame", "scene_estimator", "auto_eat", "timeline_snap", "llm_watch"],
     requires=["navigation"],
     params={
         "country": {

@@ -48,7 +48,7 @@ from framework.status import StatusLine
             "type": "str",
             "default": "",
             "desc": "额外探针：'timeline' = 运行结束回放本次 Observe 时间线（按 ability 分组），"
-            "验证可观测性事件流是否正常落地",
+            "验证可观测性事件流是否正常落地；'look' = 截当前帧提交视觉 LLM 判读画面",
         },
     },
     tags=["diag"],
@@ -206,6 +206,13 @@ def main(ctx, g, waypoint: str = "七天神像-风", do_teleport: bool = False, 
                 texts.append(f"{t!r}@({r.x:.0f},{r.y:.0f})")
             return f"{n} 个文字框: {', '.join(texts[:10])}"
         _probe("ocr_boxes", _ocr_boxes)
+
+    # ── 11.5 视觉 LLM 判读（probe='look'；CLAUDE.md §9 实机「眼睛」）──
+    # 截当前帧提交视觉大模型（glm-4.5v），返回画面描述。定位仍靠 OCR/模板，理解靠 LLM。
+    if probe == "look":
+        from framework.vision_llm import WATCH_PROMPT, look as _vlook
+
+        _probe("look", lambda: _vlook(ctx, WATCH_PROMPT))
 
     # ── 12. 大地图标定（do_map_calib；需先按 M 打开大地图，会缩放/拖动地图）──
     # 逐项回填 map_ops.py 标定常量：_ZOOM_WHEEL_SIGN / _DRAG_X_SIGN / _DRAG_Y_SIGN /

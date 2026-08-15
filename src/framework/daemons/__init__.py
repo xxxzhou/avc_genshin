@@ -18,6 +18,7 @@ from framework.daemons import quick_teleport as _quick_teleport  # noqa: F401
 from framework.daemons import auto_open_chest as _auto_open_chest  # noqa: F401
 from framework.daemons import auto_talk as _auto_talk  # noqa: F401
 from framework.daemons import timeline_snap as _timeline_snap  # noqa: F401
+from framework.daemons import llm_watch as _llm_watch  # noqa: F401
 
 __all__ = [
     "Daemon",
