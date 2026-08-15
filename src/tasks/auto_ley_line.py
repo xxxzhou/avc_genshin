@@ -30,7 +30,7 @@ from framework.resources import res
 @task(
     name="auto_ley_line",
     desc="自动刷地脉之花（启示/藏金）：动态找花→传送→战斗→领奖→循环。region 保留兼容旧参数（v2 用 find_blossom 自动定位）。",
-    daemons=["frame", "scene_estimator", "auto_eat"],
+    daemons=["frame", "scene_estimator", "auto_eat", "timeline_snap", "llm_watch"],
     requires=["navigation", "fighter"],
     params={
         "region": {
@@ -84,10 +84,14 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) 
         )
 
         # 2. 传送到最近点（teleport_to 内部自动开关地图）
-        g.teleport_to(info["nearest_tp"].name)
+        # ⚠ 2026-08-15 实机：同名「传送锚点」大量存在，按名解析歧义（曾落到群玉阁）
+        # → 改传坐标（TpPosition.tran_x/tran_y）。
+        tp_pt = info["nearest_tp"]
+        g.teleport_to((tp_pt.tran_x, tp_pt.tran_y))
         ob.event(
             "auto_ley_line.step", ability="auto_ley_line", phase="act",
-            step="teleport", iter=itr, ok=True, target=info["nearest_tp"].name,
+            step="teleport", iter=itr, ok=True,
+            target=f"{tp_pt.name}@({tp_pt.tran_x:.0f},{tp_pt.tran_y:.0f})",
             evidence=ob.save_evidence(ctx, f"teleport_landed_iter{itr}"),
         )
 

@@ -116,9 +116,13 @@ _DOMAIN_TYPES = frozenset(
 )
 
 # ── 地脉花图标模板 ──
+# ⚠ 2026-08-15 实机标定（r_20260815_092822/094720）：官方 32×32 模板在 zoom=3.0
+# 实机渲染下真位置仅 ~0.58-0.62，且最高分常落在**错误位置**（假阳性 ≥0.6 →
+# 假花坐标 → 错误传送目标）。已移除，只留实机裁剪标定模板。
+# Blossom_of_Wealth_live.png：zoom 3.0 档实机裁剪，真位置 1.0。
+# revelation（启示）live 标定待实机画面出现启示之花后补。
 _BLOSSOM_TEMPLATES: dict[str, str] = {
-    "revelation": "map/Blossom_of_Revelation.png",
-    "wealth": "map/Blossom_of_Wealth.png",
+    "wealth": "map/Blossom_of_Wealth_live.png",
 }
 _BLOSSOM_THRESHOLD = 0.6  # 地脉花图标匹配阈值（比传送点低，花图标较小/变化多）
 

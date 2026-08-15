@@ -129,6 +129,8 @@ class TestAutoLeyLine:
         g = _g()
         nearest_tp = MagicMock()
         nearest_tp.name = "七天神像-风"
+        nearest_tp.tran_x = 2284.5
+        nearest_tp.tran_y = -900.3
         g.find_blossom_and_nearest_tp.return_value = {
             "blossom_type": "revelation",
             "blossom_pos": (2284.5, -900.3),
@@ -144,7 +146,8 @@ class TestAutoLeyLine:
         assert result["flower_type"] == "revelation"
         assert result["last_nearest_tp"] == "七天神像-风"
         g.find_blossom_and_nearest_tp.assert_called_once()
-        g.teleport_to.assert_called_once_with("七天神像-风")
+        # 按坐标传送（同名「传送锚点」歧义，2026-08-15 实机改传坐标）
+        g.teleport_to.assert_called_once_with((2284.5, -900.3))
         g.go_to.assert_called_once()
         g.fight_until_clear.assert_called_once()
 

@@ -295,7 +295,8 @@ class HighLevelApi:
         from framework import utils
 
         mc = MapController(self.ctx, self)
-        frame = self.ctx.capture()
+        # ⚠ 同下：地图交互期间 SourcePlayer 帧不可靠，统一 sc 直抓（2026-08-15 实机）
+        frame = self.ctx._capture_sc()
         if frame is None:
             self._observe("detect.blossom", ability="tp", phase="observe",
                           step="capture_initial", ok=False, reason="no_frame")
@@ -319,23 +320,45 @@ class HighLevelApi:
             if abs(north_delta) > 100 or abs(west_delta) > 100:
                 mc.drag_map(north_delta, west_delta, zoom)
                 utils.sleep(0.3)
-                frame = self.ctx.capture()
+                frame = self.ctx._capture_sc()
                 if frame is None:
                     self._observe("detect.blossom", ability="tp", phase="observe",
                                   step="recapture_after_drag", ok=False, reason="no_frame")
                     return None
         mc.set_zoom_level(3.0, frame)
-        utils.sleep(0.3)
-        frame = self.ctx.capture()
+        # ⚠ 2026-08-15 实机（r_20260815_093453/093814/094006 三连漏检）：缩放动画 +
+        # SourcePlayer 地图交互期间帧冻结/滞后——ctx.capture() 的重试帧漏检，而失败
+        # 后的存证帧 live 模板 1.0 命中。改用 _capture_sc() 直抓（IScreenCapture 归一化，
+        # 实机始终真实，同传送冻结案结论）+ 重试 5 次 × 0.7s 兜住动画 settle。
+        blossoms: list = []
+        for attempt in range(5):
+            utils.sleep(0.7 if attempt else 0.4)
+            frame = self.ctx._capture_sc()
+            if frame is None:
+                continue
+            found = mc.find_blossom_on_map(frame)
+            # 诊断：逐次存 sc 帧本体 + 计数事件（2026-08-15 三连漏检定位用，稳后删）
+            try:
+                from framework import logging as _flog  # noqa: F401
+                self.ctx.observe.debug_dir.mkdir(parents=True, exist_ok=True)
+                ev_path = str(self.ctx.observe.debug_dir / f"sc_try{attempt}.png")
+                frame.save(ev_path)
+            except Exception:
+                ev_path = None
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="retry", attempt=attempt, count=len(found),
+                          evidence=ev_path)
+            if flower_type:
+                found = [b for b in found if b.blossom_type == flower_type]
+            if found:
+                blossoms = found
+                break
         if frame is None:
             self._observe("detect.blossom", ability="tp", phase="observe",
                           step="recapture_after_zoom", ok=False, reason="no_frame")
             return None
 
-        # 1. 检测花图标
-        blossoms = mc.find_blossom_on_map(frame)
-        if flower_type:
-            blossoms = [b for b in blossoms if b.blossom_type == flower_type]
+        # 1. 检测花图标（blossoms 已在重试循环中填充）
         if not blossoms:
             # ⚠ 失败时存图：让 AI 能看到当时地图状态（视口是否对/zoom 是否对）
             evidence = self._save_evidence("find_blossom_no_match")
