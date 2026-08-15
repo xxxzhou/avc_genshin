@@ -20,7 +20,9 @@ DPI / 窗口边框归一化：
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from framework import utils
@@ -31,6 +33,15 @@ if TYPE_CHECKING:  # 仅类型标注用，运行时不导入 avc
     from avc.input import IInputController, IScreenCapture
     from avc.player import ISourcePlayer
     from avc.vision import ITemplateMatcher, ITextRecognizer
+
+# SourcePlayer 帧指纹不变超过此时长（秒）→ 本次 capture 走 IScreenCapture 回退。
+# 实机 2026-08-15（r_20260815_064010）：传送加载切换后 SourcePlayer 冻结在旧
+# 地图帧 80s+，而 sc 始终是真实画面 → wait_main_ui 空等 60s、小地图定位读到
+# 旧帧假位置 [3201,-967]、导航盲走。守卫：帧不变超时即不信任 player 帧源。
+_STALE_FALLBACK_S = 6.0
+# 指纹采样区（中心小裁块，成本 ~0.1ms）：静止画面（大地图 idle）也可能合法
+# 不变，此时回退 sc 内容一致、仅稍慢，无正确性损失。
+_SIG_CROP = 96
 
 
 class _RECT(ctypes.Structure):
@@ -89,6 +100,11 @@ class GameContext:
         self._player: ISourcePlayer | None = None
         self._shot_buf: IImageBuffer | None = None  # 预分配截图 buffer
         self._init_source_player(window_title)
+
+        # ── 帧冻结守卫状态（capture 健壮性，见 _player_frame_stale）──
+        self._frame_sig: str | None = None
+        self._frame_change_t: float = time.monotonic()
+        self._stale_reported: bool = False
 
         # ── 输入平滑（avc 提供的部分）──
         self.ic.setMoveDurationMs(self.cfg.move_duration_ms)
@@ -192,23 +208,42 @@ class GameContext:
         """取最新一帧，返回纯 1080p 游戏画面 buffer。
 
         优先用 SourcePlayer（高频，screenShot 直接取帧，GPU 侧已缩放到目标分辨率）；
-        回退到 IScreenCapture（首次/Player 未就绪时，需裁边框+缩放）。
+        回退到 IScreenCapture（首次/Player 未就绪/**帧冻结守卫**时，需裁边框+缩放）。
         """
         buf = None
         from_player = False
+        # cfg 可能缺失（mock/测试替身）时用框架默认分辨率兜底，避免干扰尺寸守卫
+        try:
+            want_w, want_h = self.cfg.resolution
+        except Exception:
+            want_w, want_h = (1920, 1080)
         # 优先 SourcePlayer（已 enableSizeChange，直接输出目标分辨率，无需裁剪）
         if self._player is not None and self._shot_buf is not None:
             sr = self._player.getSurfaceRender()
             if sr and sr.screenShot(self._shot_buf):
-                buf = self._shot_buf
-                from_player = True
+                # ⚠ 尺寸守卫（2026-08-15 实机 P0）：SourcePlayer 长时间高频截图后
+                # 可能回读异常尺寸/内容损坏的帧（cam.rotate read_fail 后 nav 继续 →
+                # avc 内部 matchTemplate crossCorr 断言崩溃、绕过 Python 异常路径）。
+                # 尺寸不匹配视为坏帧 → 丢给 IScreenCapture 归一化回退。
+                if (self._shot_buf.width != want_w or self._shot_buf.height != want_h):
+                    self.observe.event("capture.bad_frame", ability="capture",
+                                       phase="observe", ok=False,
+                                       reason="source_player_bad_size",
+                                       w=self._shot_buf.width, h=self._shot_buf.height)
+                    from_player = False
+                else:
+                    buf = self._shot_buf
+                    from_player = True
+
+        # 帧冻结守卫：SourcePlayer 帧指纹长时间不变 → 不信任，改走 sc（真实画面）
+        if from_player and self._player_frame_stale():
+            fb = self._capture_sc()
+            if fb is not None:
+                return fb
 
         # 回退 IScreenCapture
         if buf is None:
-            self.sc.refresh()
-            nb = self.sc.getBuffer()
-            if nb:
-                buf = self._Image.IImageBuffer(nb)
+            buf = self._capture_sc(raw=True)
 
         if buf is None:
             return None
@@ -237,6 +272,73 @@ class GameContext:
             except Exception:
                 pass  # crop/resize 失败回退原始 buffer
         return buf
+
+    # ── 帧冻结守卫（capture 健壮性，2026-08-15 实机）──
+
+    def _capture_sc(self, raw: bool = False) -> IImageBuffer | None:
+        """IScreenCapture 取一帧并归一化（裁边框+缩放到目标分辨率）。
+
+        raw=True 时只取 buffer 不裁剪（capture 旧回退分支等价行为）。
+        """
+        self.sc.refresh()
+        nb = self.sc.getBuffer()
+        if not nb:
+            return None
+        buf = self._Image.IImageBuffer(nb)
+        if raw:
+            return buf
+        if self._border_left > 0 or self._border_top > 0:
+            want_w, want_h = self.cfg.resolution
+            try:
+                cli_w = buf.width - 2 * self._border_left
+                cli_h = buf.height - self._border_top - self._border_left
+                cropped = self._Image.crop(
+                    buf, self._border_left, self._border_top, cli_w, cli_h
+                )
+                if cropped is not None:
+                    if cropped.width != want_w or cropped.height != want_h:
+                        resized = self._Image.resize(cropped, want_w, want_h)
+                        if resized is not None:
+                            return resized
+                    return cropped
+            except Exception:
+                pass
+        return buf
+
+    def _player_frame_stale(self) -> bool:
+        """SourcePlayer 帧指纹是否长时间不变（疑似冻结）。
+
+        指纹 = 中心 96×96 裁块的 md5。帧变化 → 记时间戳并清除冻结态；
+        不变超过 ``_STALE_FALLBACK_S`` → 判冻结（每次进入冻结态只发一条
+        ``capture.stale`` 事件，帧恢复时发 ok=True 一条）。
+        """
+        buf = self._shot_buf
+        if buf is None:
+            return False
+        try:
+            cx = max(0, (buf.width - _SIG_CROP) // 2)
+            cy = max(0, (buf.height - _SIG_CROP) // 2)
+            crop = self._Image.crop(buf, cx, cy, _SIG_CROP, _SIG_CROP)
+            if crop is None:
+                return False
+            sig = hashlib.md5(crop.to_bytes()).hexdigest()
+        except Exception:
+            return False  # 指纹失败不拦截正常路径
+        now = time.monotonic()
+        if sig != self._frame_sig:
+            self._frame_sig = sig
+            self._frame_change_t = now
+            if self._stale_reported:
+                self._stale_reported = False
+                self.observe.event("capture.stale", ability="capture",
+                                   phase="observe", ok=True, reason="recovered")
+            return False
+        stale = (now - self._frame_change_t) > _STALE_FALLBACK_S
+        if stale and not self._stale_reported:
+            self._stale_reported = True
+            self.observe.event("capture.stale", ability="capture",
+                               phase="observe", ok=False, reason="player_frame_frozen")
+        return stale
 
     def _window_geometry(
         self,

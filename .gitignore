@@ -47,3 +47,4 @@ tests/fixtures/web/**
 # ── Claude Code 会话状态 / 散落调试存证 ──
 .claude/
 /debug_*.png
+death_regions/

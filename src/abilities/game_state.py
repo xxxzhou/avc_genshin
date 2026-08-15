@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from framework.resources import res
 from framework.scene import Scene, SceneClassifier, SceneState
+from abilities.vision_utils import _template_fits  # 模板尺寸守卫（防 avc OpenCV 崩溃）
 
 if TYPE_CHECKING:
     from avc.image import IImageBuffer
@@ -136,6 +137,12 @@ def _find_template(
     if ctx.tm.addTemplatePath(path, threshold) < 0:
         ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
                           ok=False, reason="template_missing", _quiet=_quiet)
+        return False
+    # ⚠ 模板 ≥ 搜索区域会触发 avc 内部 OpenCV matchTemplate 断言崩溃（P0）→ 跳过。
+    # scene_estimator 10Hz 轮询本函数，此守卫防 ROI<模板 硬崩（2026-08-15 实机）。
+    if not _template_fits(str(path), buf, roi):
+        ctx.observe.event("detect.ui", ability="game_state", name=tpl_key,
+                          ok=False, reason="template_larger_than_region", _quiet=_quiet)
         return False
     n = ctx.tm.match(buf)
     if n <= 0:

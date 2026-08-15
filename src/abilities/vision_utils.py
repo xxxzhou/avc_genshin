@@ -10,6 +10,7 @@ getMatch(i) → MatchResult(.x/.y/.w/.h/.score)；OCR 为 recognize → getMatch
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -80,6 +81,53 @@ def _need(ctx: "GameContext", which: str):
 # ── 模板匹配 ──
 
 
+@lru_cache(maxsize=256)
+def _tpl_size(path: str) -> tuple[int, int] | None:
+    """读模板尺寸 (w, h)（cv2，离线无 avc 崩溃风险）。失败返回 None。"""
+    try:
+        import cv2
+
+        img = cv2.imread(path)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        return (w, h)
+    except Exception:
+        return None
+
+
+def _search_region_size(frame, roi: tuple[int, int, int, int] | None) -> tuple[int, int]:
+    """计算搜索区域尺寸 (w, h)：roi=(x,y,w,h) 或整个 frame。"""
+    if roi:
+        return roi[2], roi[3]
+    w = getattr(frame, "width", 0) or 0
+    h = getattr(frame, "height", 0) or 0
+    return w, h
+
+
+def _template_fits(
+    tmpl_path: str,
+    frame,
+    roi: tuple[int, int, int, int] | None,
+) -> bool:
+    """模板是否严格小于搜索区域（每维至少小 1px）。
+
+    ⚠ 防 avc 内部 OpenCV ``cv::crossCorr`` 断言崩溃（2026-08-15 实机 P0）：
+    模板 ≥ 搜索区域时 ``matchTemplate`` 触发 ``corr.rows <= img.rows + templ.rows - 1``
+    断言失败，走 OpenCV ``terminate`` 绕过 Python 异常路径 → 无 failure 事件/无存证。
+    读不到模板尺寸时保守放行（不拦截，避免误伤正常小模板）。
+    """
+    size = _tpl_size(tmpl_path)
+    if size is None:
+        return True  # 读不到模板尺寸时保守放行
+    tw, th = size
+    rw, rh = _search_region_size(frame, roi)
+    # 容错：mock/异常 frame 的 .width/.height 不是数字（MagicMock），避免崩溃；放行
+    if not (isinstance(rw, (int, float)) and isinstance(rh, (int, float))) or rw <= 0 or rh <= 0:
+        return True  # 无搜索区域信息/异常时不拦截
+    return tw < rw and th < rh
+
+
 def find_template(
     ctx: "GameContext",
     path: str | Path,
@@ -107,10 +155,17 @@ def find_template(
         tm.setRoi(*roi)
     else:
         tm.clearRoi()
-    if tm.addTemplatePath(_resolve_template_path(path), threshold) < 0:
+    resolved = _resolve_template_path(path)
+    if tm.addTemplatePath(resolved, threshold) < 0:
         ctx.observe.event("detect.template", ability="vision_utils",
                           name=Path(path).name, threshold=threshold, ok=False,
                           reason="template_missing", _quiet=_quiet)
+        return None
+    # ⚠ 模板 ≥ 搜索区域会触发 avc 内部 OpenCV matchTemplate 断言崩溃（P0）→ 跳过
+    if not _template_fits(resolved, buf, roi):
+        ctx.observe.event("detect.template", ability="vision_utils",
+                          name=Path(path).name, threshold=threshold, ok=False,
+                          reason="template_larger_than_region", _quiet=_quiet)
         return None
     n = tm.match(buf)
     if n <= 0:
@@ -152,9 +207,15 @@ def find_all_templates(
         tm.clearRoi()
     name_by_idx: dict[int, str] = {}
     for p in paths:
-        idx = tm.addTemplatePath(_resolve_template_path(p), threshold)
+        resolved = _resolve_template_path(p)
+        # ⚠ 模板 ≥ 搜索区域会触发 avc 内部 OpenCV matchTemplate 崩溃（P0）→ 跳过
+        if not _template_fits(resolved, buf, roi):
+            continue
+        idx = tm.addTemplatePath(resolved, threshold)
         if idx >= 0:
             name_by_idx[idx] = Path(p).name
+    if not name_by_idx:
+        return {}
     n = tm.match(buf)
     out: dict[str, list[Rect]] = {}
     for i in range(n):

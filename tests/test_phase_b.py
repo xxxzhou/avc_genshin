@@ -1168,6 +1168,21 @@ class TestMapControllerDrag:
         ctx.to_screen = MagicMock(return_value=(960, 540))
         return ctx
 
+    def test_drag_start_uses_safe_point(self):
+        """拖拽起点固定为 _DRAG_START_SAFE（(1100,540) buffer），不再按方向自适应。
+
+        2026-08-15 实机（calib_drag）确认：原"按方向自适应起点"在纯西向反向时
+        生成 (1440,540)，落在大地图右侧 UI 上 → mouseDown 被吞 → 手势失效（Δwest=0）。
+        """
+        from abilities.navigation.map_ops import _DRAG_START_SAFE
+
+        assert _DRAG_START_SAFE == (1100, 540)
+        ctx = self._ctx()
+        mc = _mc(ctx)
+        mc.drag_map(0.0, -200.0, 4.0)  # 纯西向反向（曾失效场景）
+        # 起点 to_screen 收到安全点（buffer 坐标 1100,540）
+        assert (1100, 540) in [c.args for c in ctx.to_screen.call_args_list]
+
     def test_drag_sequence_and_total_distance(self):
         """拖 1000 北向 game 单位（zoom=1）→ 多手势分段，累计屏幕 Y 位移 ≈ 3570。
 
@@ -1537,15 +1552,22 @@ class TestTpPanelDetect:
     def test_find_teleport_button_locates_text(self, monkeypatch):
         from abilities.vision_utils import Rect
 
-        from abilities.tp_panel import find_teleport_button
+        from abilities.tp_panel import _TELEPORT_BUTTON_ROI, find_teleport_button
 
-        monkeypatch.setattr(
-            "abilities.vision_utils.find_text",
-            lambda *a, **k: Rect(100, 100, 40, 20),  # cx=120, cy=110
-        )
+        captured = {}
+
+        def fake_find(ctx, *a, **k):
+            captured["roi"] = k.get("roi")
+            captured["text"] = a[0] if a else k.get("text")
+            return Rect(100, 100, 40, 20)  # cx=120, cy=110
+
+        monkeypatch.setattr("abilities.vision_utils.find_text", fake_find)
         btn = find_teleport_button(_MockCtx(), MagicMock())
         assert btn is not None
         assert (btn.cx, btn.cy) == (120, 110)
+        # ⚠ 2026-08-15 实机修复：传按钮 ROI 必须为右下专用 ROI，避开右上「传送锚点」标题
+        assert captured["roi"] == _TELEPORT_BUTTON_ROI
+        assert captured["text"] == "传送"
 
     def test_close_marker_panel_presses_esc_until_closed(self, monkeypatch):
         from avc._core import KeyCode

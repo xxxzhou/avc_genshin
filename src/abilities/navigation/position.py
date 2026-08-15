@@ -147,7 +147,12 @@ _MAPBACK_INFO_FILES = ["mapback_info.json", "mapback_6_0_info.json"]  # 分层�
 _BIG_MAP_ROI = (0, 0, 1600, 900)
 
 # 粗匹配局部搜索半径（color-px 单位，对照 BGI MiniMapMatchConfig.RoughSearchRadius=50）
-_ROUGH_SEARCH_RADIUS = 50
+# ⚠ 2026-08-15 实机（走路段 avc corr.rows 崩溃）：局部搜索 = prev±50，当 prev 靠近
+# coarseMap 边界时 avc 内部 autoRoi&full 后 searchRoi < coarseSize(52) → 粗匹配
+# matchTemplate(52模板 > searchRoi) 触发 cv::crossCorr 断言崩溃（terminate 无法 catch）。
+# 改 0 = 禁用局部搜索 = 全图搜索 → searchRoi 恒为全图(≥52)，不崩。粗匹配模板仅 52×52，
+# 全图匹配开销可忽略；精匹配仍用 setSearchRadius 局部（prev 附近）。
+_ROUGH_SEARCH_RADIUS = 0
 
 # color-px → 世界单位（BGI: color webp 是 gray webp 的 1/5 缩略 → 1 color-px = 5 世界单位 at Scale=1）
 _COARSE_PIXEL_TO_WORLD = 5.0
@@ -218,6 +223,22 @@ class PositionGetter:
         if frame is None:
             frame = self.ctx.capture()
         if frame is None:
+            return None
+
+        # 场景守卫：大地图打开时画面无小地图，裁出的"伪小地图"会匹配出跨 4000
+        # 单位的假位置（2026-08-15 实机 [3201,-967] 锁死）→ 直接判失败
+        from framework.scene import Scene, classify_scene
+
+        try:
+            state = classify_scene(frame)
+        except Exception:
+            state = None
+        if state is not None and state.scene is Scene.MAP:
+            self.ctx.observe.event(
+                "pos.match", ability="pos", phase="observe",
+                ok=False, reason="scene_map_minimap_invalid",
+                throttle_key="pos.match.scene_map",
+            )
             return None
 
         minimap = self._extract_minimap(frame)
@@ -835,7 +856,12 @@ class PositionGetter:
             if gray_path.exists():
                 mm.setFineMapImageByPath(str(gray_path))
             mm.setCoarseSize(52)
-            mm.setExactSize(260)
+            # ⚠ 2026-08-15 实机（走路段 avc corr.rows 崩溃）：原 ExactSize=260 会把
+            # mini156(156×156) resize 放大到 260，精匹配 searchArea 需 ≥260，走路段
+            # pos.match 高频触发时某边缘组合导致 cv::crossCorr 断言崩溃（terminate，
+            # 无法 catch）。改为 156（= 实际小地图尺寸，不放大）：searchArea 只需 ≥156，
+            # 大幅降低触发面；且尺寸匹配更稳。粗匹配仍 52（不变）。
+            mm.setExactSize(156)
             return mm
         except Exception:
             return None

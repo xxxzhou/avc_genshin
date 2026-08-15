@@ -43,6 +43,11 @@ class TeleportPanelKind(Enum):
 # 覆盖实机证据坐标：顶部 '标记（点击更改标记名称）'@(1634,75) 与右下
 # '确认'@(1689,1007)/'追踪'@(1810,1007)/'删除'@(1569,1008)/'总标记'@(1532,934)/F@(1450,1028)。
 _TP_PANEL_OCR_ROI = (1152, 0, 768, 1080)
+# ⚠ 传送按钮 OCR 区域：右下角，仅下半屏 + 偏右，避开顶部「传送锚点」标题里的
+# 「传送」二字（实机 2026-08-15：find_teleport_button 误匹配右上 (1384,745)「传送锚点」→
+# 点了标题而非右下传送按钮 → 传送未触发，wait_main_ui_timeout）。
+# 传送按钮在右下约 (1620, 670) 区域；留余量用 y∈[500,780], x∈[1300,1920]。
+_TELEPORT_BUTTON_ROI = (1300, 500, 620, 280)
 
 # 标记面板关键词（按特异性排序；'总标记' 为实机最独特的标记面板计数器文本）。
 _MARKER_KEYWORDS = ("总标记", "追踪", "删除", "更改标记名称", "标记")
@@ -84,10 +89,16 @@ def find_teleport_button(
     ctx: "GameContext",
     frame: "IImageBuffer | None" = None,
 ):
-    """定位传送面板 '传送' 按钮（OCR），返回 Rect 或 None。"""
+    """定位传送面板 '传送' 按钮（OCR），返回 Rect 或 None。
+
+    ⚠ 2026-08-15 实机：原 ROI=全右半 (1152,0,768,1080) 会匹配到右上角
+    「传送锚点」标题里的「传送」(1384,745) → 点击标题而非右下真正传送按钮
+    → 传送未触发。改用右下专用 ROI _TELEPORT_BUTTON_ROI 避开标题误匹配。
+    找不到时返回 None（调用方会按 F 兜底）。
+    """
     from abilities import vision_utils as vu
 
-    return vu.find_text(ctx, "传送", roi=_TP_PANEL_OCR_ROI, frame=frame)
+    return vu.find_text(ctx, "传送", roi=_TELEPORT_BUTTON_ROI, frame=frame)
 
 
 def close_marker_panel(ctx: "GameContext", max_attempts: int = _CLOSE_MARKER_MAX_ATTEMPTS) -> None:

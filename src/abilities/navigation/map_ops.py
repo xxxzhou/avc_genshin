@@ -73,7 +73,11 @@ _MAP_CENTER_Y = 540
 # **按拖拽方向自适应起点**：起点 = 中心往拖拽方向反向偏移 _DRAG_START_BACKOFF，
 # 既避开中心标记 hitbox，又给 ≤400px 手势留足屏幕余量。实测可用起点：
 # (960,780)/(960,450)/(1100,540)/(820,540)/(1500,800) 均 80%+ 像素差。
-_MAP_DRAG_START_BACKOFF = 480  # 起点反向偏移（px；> 手势上限 400 留余量）
+_MAP_DRAG_START_BACKOFF = 480  # 起点反向偏移（px；> 手势上限 400 留余量；已弃用，见 _DRAG_START_SAFE）
+# 固定安全拖拽起点（buffer 坐标）。⚠ 2026-08-15 实机（calib_drag）确认：
+# 原按方向自适应起点会撞上大地图右侧 UI（mouseDown 被吞）→ 改用固定安全点。
+# 该点位于视口中心右侧 140px，避开中心玩家标记 hitbox，且任意方向 ≤400px 手势不出屏。
+_DRAG_START_SAFE = (1100, 540)
 _COUNTRY_BTN_POS = (1760, 1020)  # 右下"当前区域"按钮（BGI Width-160, Height-60）
 _COUNTRY_OCR_ROI = (1280, 0, 640, 1080)  # 国家列表 OCR 区（右 1/3，BGI Width*2/3）
 _SWITCH_AREA_RETRIES = 4  # 国家列表 OCR 重试次数（BGI SwitchAreaCandidateRetryCount）
@@ -274,9 +278,14 @@ class MapController:
         buf_w = 1920  # buffer 宽（1080p）
         buf_to_scr = self.ctx.sc.width() / buf_w if buf_w > 0 else 1.0
 
-        # 起点屏幕坐标：按拖拽方向自适应（反向偏移，避开中心玩家标记 hitbox）
-        sx = _MAP_CENTER_X - sign_x * _MAP_DRAG_START_BACKOFF if sign_x else _MAP_CENTER_X
-        sy = _MAP_CENTER_Y - sign_y * _MAP_DRAG_START_BACKOFF if sign_y else _MAP_CENTER_Y
+        # 起点屏幕坐标：固定安全起点（避开中心玩家标记 hitbox、顶部/右侧地图 UI）。
+        # ⚠ 2026-08-15 实机（calib_drag）修正：原"按拖拽方向自适应起点" = 中心反向偏移
+        # _DRAG_START_BACKOFF，会产生 (1440,540)/(960,60)/(480,540)/(960,1020) 等边缘起点。
+        # 其中 (1440,540)（纯西向反向）落在大地图右侧 UI 上 → mouseDown 被吞 → 拖拽手势
+        # 失效（Δwest=0），是 tp.navigate 视口卡死（nav_abort_no_progress）的一个来源。
+        # 实测安全起点（像素差 80%+）：(960,780)/(960,450)/(1100,540)/(820,540)/(1500,800)。
+        # 拖拽方向/位移由下方 moveTo 目标坐标决定，起点固定不影响方向。
+        sx, sy = _DRAG_START_SAFE  # buffer 坐标
         scr_x, scr_y = self.ctx.to_screen(sx, sy)
         ic.moveTo(int(scr_x), int(scr_y))
         ic.mouseDown(btn)

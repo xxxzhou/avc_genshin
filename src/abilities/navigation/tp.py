@@ -231,8 +231,25 @@ class Teleporter:
         #    点击命中自定义标记 pin → 打开标记面板 → Esc 关闭后换下一候选重试
         self._click_and_confirm_teleport(candidates)
 
-        # 5. 等待传送完成
-        self.g.wait_main_ui(timeout=_TELEPORT_WAIT_MAIN_UI_TIMEOUT)
+        # 5. 等待传送完成（超时 = 确认点击未生效/截图冻结 → 归因报错，
+        #    不再盲继续。2026-08-15 实机：确认"成功"后地图仍开着，走路段盲走假定位）
+        # ⚠ 2026-08-15 实机（r_20260815_074025）：传送成功落地主界面，但传送期间
+        # SourcePlayer 帧冻结触发 capture.stale → scene_estimator 守护用 IScreenCapture
+        # 回退帧在过渡瞬间判 MAP/UNKNOWN → wait_main_ui 等 60s 仍 MAP → 误判失败。
+        # 修复：wait_main_ui 前强制 capture + classify_scene 一次，把 shared.scene 刷到
+        # 实时画面（主界面→MAIN_UI），scene_estimator 守护高频更新有滞后。
+        self._force_scene_refresh()
+        if not self.g.wait_main_ui(timeout=_TELEPORT_WAIT_MAIN_UI_TIMEOUT):
+            self.ctx.observe.event(
+                "tp.confirm", ability="tp", phase="act",
+                ok=False, reason="wait_main_ui_timeout",
+            )
+            from framework.errors import TaskError
+
+            raise TaskError(
+                f"传送后 {_TELEPORT_WAIT_MAIN_UI_TIMEOUT}s 未回到主界面"
+                f"（确认点击未生效或画面冻结）: {name_or_pos}"
+            )
 
         # 6. 传送后锚定定位（解决无 prev 时 6 层小地图定位选错层）
         self._set_prev_position(target)
@@ -593,6 +610,39 @@ class Teleporter:
 
             self._pg = PositionGetter(self.ctx)
         self._pg.set_prev_position(target.tran_x, target.tran_y)
+
+    def _force_scene_refresh(self) -> None:
+        """传送确认点击后强制刷一次 scene 到 shared.scene。
+
+        解决 2026-08-15 实机 r_074025：传送成功但 SourcePlayer 冻结期间
+        scene_estimator 守护高频判定滞后（IScreenCapture 回退帧在过渡瞬间判
+        MAP/UNKNOWN）→ wait_main_ui 等 60s 仍 MAP → 误判失败。
+        直接 capture + classify_scene 一次写入 shared.scene，让 wait_main_ui
+        拿到实时 scene。失败静默（不阻断：wait_main_ui 仍兜底超时归因）。
+        """
+        try:
+            frame = self.ctx.capture()
+            if frame is None:
+                return
+            from framework.scene import classify_scene
+            from dataclasses import replace
+            import time as _time
+
+            state = classify_scene(frame)
+            prev = self.g.runtime.shared.scene if self.g.runtime and self.g.runtime.shared else None
+            since = prev.since if (prev and prev.scene == state.scene) else _time.monotonic()
+            self.g.runtime.shared.scene = replace(state, since=since)
+            self.ctx.observe.event(
+                "tp.scene_refresh", ability="tp", phase="act",
+                ok=True, scene=str(state.scene),
+                throttle_key="tp.scene_refresh",
+            )
+        except Exception as e:
+            self.ctx.observe.event(
+                "tp.scene_refresh", ability="tp", phase="act",
+                ok=False, reason="exception", detail=repr(e),
+                throttle_key="tp.scene_refresh",
+            )
 
     @staticmethod
     def _is_clickable(x: float, y: float) -> bool:
