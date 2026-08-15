@@ -174,7 +174,7 @@ class TestLlmWatchDaemon:
         )
         dctx.observe.logger = _Logger()
 
-        asyncio.get_event_loop().run_until_complete(daemon_inst.step(dctx))
+        asyncio.run(daemon_inst.step(dctx))
         files = list(llm_dir.glob("*.txt"))
         assert len(files) == 1
         assert files[0].read_text(encoding="utf-8").startswith("1) 主界面")
@@ -205,12 +205,8 @@ class TestLlmWatchDaemon:
             shared=SimpleNamespace(frame=SimpleNamespace()),
             observe=_Obs(),
         )
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(inst.step(dctx))  # 第 1 次：立即判读
-            loop.run_until_complete(inst.step(dctx))  # 第 2 次：间隔内 → 跳过
-        finally:
-            loop.close()
+        asyncio.run(inst.step(dctx))  # 第 1 次：立即判读
+        asyncio.run(inst.step(dctx))  # 第 2 次：间隔内 → 跳过
         assert len(calls) == 1
 
     def test_err_no_txt_but_event(self, tmp_path, monkeypatch):
@@ -238,11 +234,7 @@ class TestLlmWatchDaemon:
             observe=_Obs(),
         )
         dctx.observe.logger = _Logger()
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(inst.step(dctx))
-        finally:
-            loop.close()
+        asyncio.run(inst.step(dctx))
         assert not (tmp_path / "llm").exists() or not list((tmp_path / "llm").glob("*.txt"))
         assert events[0][1]["ok"] is False
         assert "RuntimeError" in events[0][1]["reason"]
