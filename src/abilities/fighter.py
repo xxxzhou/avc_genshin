@@ -390,6 +390,7 @@ class SimpleFighter:
         rotation = rotation if rotation is not None else DEFAULT_ROTATION
         self.ctx.ensure_foreground()  # 战斗全程 ic 直调，开头保证前台
         deadline = time.monotonic() + duration_s
+        last_aim = 0.0
         try:
             while time.monotonic() < deadline:
                 if not self.has_enemy():
@@ -398,11 +399,43 @@ class SimpleFighter:
                     if time.monotonic() >= deadline:
                         break
                     self._check_survival()  # 每步前查血量/死亡
+                    # 周期瞄准（2026-08-22 实机 r_20260822_035245：站桩施法 25s 敌满
+                    # 血——技能全打空。敌人血条偏离屏幕中心 → 小幅转相机对准再出招）
+                    now = time.monotonic()
+                    if now - last_aim >= 1.2:
+                        last_aim = now
+                        self._aim_nearest()
                     self._exec_step(step)
                     if _STEP_DEADLINE_CHECK and not self.has_enemy():
                         break
         finally:
             self._release_everything()
+
+    def _aim_nearest(self, deadzone_px: float = 110.0) -> None:
+        """把最近敌人血条转到屏幕中心附近（仅水平）。
+
+        血条在屏幕右侧 → 相机右转（move_by_rel +x）。纵向不转（俯仰改变弹道
+        预判，水平对准足够）。
+        """
+        enemy = self.find_nearest_enemy()
+        if enemy is None:
+            return
+        dx = enemy.cx - _PRE_AIM[0]
+        if abs(dx) <= deadzone_px:
+            return
+        move_x = int(max(-320.0, min(320.0, dx * 0.35)))
+        try:
+            self.ctx.move_by_rel(move_x, 0)
+            self.ctx.observe.event(
+                "fight.aim", ability="fighter", phase="act",
+                enemy_x=int(enemy.cx), move_x=move_x, ok=True,
+                throttle_key="fight.aim",
+            )
+        except Exception as e:
+            self.ctx.observe.event(
+                "fight.aim", ability="fighter", phase="act",
+                ok=False, reason=repr(e), throttle_key="fight.aim",
+            )
 
     def pick_drops(self, timeout: float = 8.0) -> int:
         """战斗后拾取掉落：等宝箱/花 F 图标→按 F，窗口内计数（简化版，无 YOLO 光束）。
