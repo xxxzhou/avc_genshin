@@ -62,6 +62,20 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) 
     from framework.scene import Scene
 
     ob = ctx.observe
+    # UI 状态清理（2026-08-22 实机：上一 run 残留输入把游戏留在角色/菜单面板，
+    # M 键在菜单里无效 → 开图静默失败）。ESC×2 退出常见菜单层。
+    try:
+        ctx.ensure_foreground()
+        from avc._core import KeyCode as _KC
+
+        ctx.press(_KC.escape)
+        import time as _time
+
+        _time.sleep(0.4)
+        ctx.press(_KC.escape)
+        _time.sleep(0.4)
+    except Exception:
+        pass
     done = 0
     last_info: dict | None = None
     # 失败花黑名单：山地/悬崖花 go_to 不收敛时换花重试，不死磕一朵
