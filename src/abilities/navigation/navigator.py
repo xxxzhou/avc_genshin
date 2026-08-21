@@ -274,17 +274,19 @@ class Navigator:
 
                 # 朝向（提前算，供观察事件 + 转向决策复用，避免双读 compass）
                 target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
-                # 运动朝向更新：位移 ≥60 单位才够准（<噪声），随位移刷新
+                # 运动朝向更新：位移 ≥30 单位即可刷新（r_20260822_025353：60 阈值下
+                # 慢走段过期落回翻转箭头 → 蛇形复发；30 单位 ≈ 2s 步行，噪声可控）
                 if last_move_pos is not None:
                     _md = CameraControl.distance(last_move_pos, position)
-                    if _md >= 60.0:
+                    if _md >= 30.0:
                         move_heading = CameraControl.target_orientation(last_move_pos, position)
                         move_heading_t = time.monotonic()
                         last_move_pos = position
                 else:
                     last_move_pos = position
-                # 新鲜运动朝向（<5s）优先；否则退箭头读数
-                if move_heading is not None and time.monotonic() - move_heading_t < 5.0:
+                # 新鲜运动朝向（<10s——直线行走朝向不变，过期箭头比过期运动朝向更不可信）
+                # 优先；否则退箭头读数
+                if move_heading is not None and time.monotonic() - move_heading_t < 10.0:
                     current_angle = move_heading
                 else:
                     current_angle = self._camera.get_orientation()
