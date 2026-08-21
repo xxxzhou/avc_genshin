@@ -394,6 +394,25 @@ class HighLevelApi:
 
         # 1. 检测花图标（blossoms 已在重试循环中填充）
         if not blossoms:
+            # 四方向平移扩搜（2026-08-22 实机 r_074901：玩家复位在蒙德城，城周边
+            # ±2000 单位内真没花——地脉花不刷城边。向四野各平移 ~2500 单位重检，
+            # 命中即把该方向视图当检测现场继续走主流程）
+            for nd, wd in ((2500, 0), (0, 2500), (-2500, 0), (0, -2500)):
+                mc.drag_map(nd, wd, 3.0)
+                utils.sleep(0.8)  # 拖拽惯性 settle
+                frame = self.ctx._capture_sc()
+                if frame is None:
+                    continue
+                found = mc.find_blossom_on_map(frame)
+                self._observe("detect.blossom", ability="tp", phase="observe",
+                              step="pan_search", pan=(nd, wd), count=len(found),
+                              ok=bool(found))
+                if flower_type:
+                    found = [b for b in found if b.blossom_type == flower_type]
+                if found:
+                    blossoms = found
+                    break
+        if not blossoms:
             # ⚠ 失败时存图：让 AI 能看到当时地图状态（视口是否对/zoom 是否对）
             evidence = self._save_evidence("find_blossom_no_match")
             self._observe("detect.blossom", ability="tp", phase="observe",
