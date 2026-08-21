@@ -301,16 +301,30 @@ class HighLevelApi:
         from framework import utils
 
         mc = MapController(self.ctx, self)
-        # ⚠ 同下：地图交互期间 SourcePlayer 帧不可靠，统一 sc 直抓（2026-08-15 实机）
+        # ★★★ 确定性开场重置（2026-08-22 晨定论，取代逐个增量守卫）：
+        # 地图退化状态空间（残留视图漂移/概览档/地下层/设置+标记双面板）被
+        # 增量补丁逐一覆盖后组合态仍漏（r_060159/061412/061848 三连案）。
+        # 开场固定序列：M/M 复位到玩家中心（实测 M 重开必回玩家）→ 开图动画
+        # settle → 切层检查（误点设置面板有善后）→ 无条件 zoom 4.4 宽视野。
+        # 代价 ~4s，换来从已知好状态开始检测。
+        self.ctx.release_all_keys()
+        self.ctx.press(KeyCode.m)  # 关图（当前态无论好坏一律丢弃）
+        utils.sleep(0.6)
+        self.ctx.press(KeyCode.m)  # 重开：玩家中心 + 上次 zoom
+        if not self.wait_scene(Scene.MAP, timeout=8.0):
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="deterministic_reset", ok=False,
+                          reason="map_not_reopened")
+            return None
+        utils.sleep(1.0)  # 开图动画 settle（SIFT/检测跑半开图上=假象）
         frame = self.ctx._capture_sc()
         if frame is None:
             self._observe("detect.blossom", ability="tp", phase="observe",
                           step="capture_initial", ok=False, reason="no_frame")
             return None
 
-        # ★ 切回地面层（2026-08-22 实机 r_061412：地图记忆残留**地下层**视图（层岩
-        # 巨渊地下矿区），地下渲染下花模板 0 命中 + SIFT 拿地下图匹配地表 256 底图
-        # 全是假象（漂移守卫被骗过）。tp.navigate 开头有切层，找花流程漏了）
+        # 切回地面层（r_061412：残留地下层视图下花模板 0 命中 + SIFT 假匹配；
+        # 当前版本该按钮可能误中「地图设置」→ 内含善后返回 False）
         grounded = mc.switch_to_ground_layer(frame)
         if grounded:
             utils.sleep(0.6)
@@ -320,22 +334,14 @@ class HighLevelApi:
             self._observe("detect.blossom", ability="tp", phase="act",
                           step="switch_to_ground", ok=True)
 
-        # ★ 调整缩放到固定等级再检测（BGI LocateLeyLineOutcrop 做法）
-        # 高 zoom 下 SIFT 误差被放大，坐标偏移大→选错传送点。
-        # 调到 ~3.0 后花图标仍可见，误差放大系数减小。
-        # ⚠ 注意：放大时视口范围缩小，需先把花移到中心避免丢失。
-        zoom = mc.measure_zoom_level(frame) or 3.0
+        # 无条件宽视野 4.4（玩家中心 ± 数千单位；花图标此档可见）
+        mc.set_zoom_level(4.4, frame)
+        utils.sleep(0.5)
+        frame = self.ctx._capture_sc()
+        if frame is None:
+            return None
+        zoom = mc.measure_zoom_level(frame) or 4.4
         blossoms = mc.find_blossom_on_map(frame)
-        # 初始 0 花 → 拉宽到 4.4 重找一次（2026-08-22 实机 r_20260822_053721：
-        # 地图停留在紧 zoom 的区域视图，视野内本就无花，直接 set_zoom(3.0) 更紧
-        # → 全程 0 花误报"未检测到地脉花"）
-        if not blossoms and zoom < 4.2:
-            mc.set_zoom_level(4.4, frame)
-            utils.sleep(0.6)
-            frame = self.ctx._capture_sc()
-            if frame is not None:
-                zoom = mc.measure_zoom_level(frame) or 4.4
-                blossoms = mc.find_blossom_on_map(frame)
         self._observe("detect.blossom", ability="tp", phase="observe",
                       step="find_initial", zoom_measured=zoom,
                       count=len(blossoms), ok=len(blossoms) > 0,

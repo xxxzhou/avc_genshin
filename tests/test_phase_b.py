@@ -1948,6 +1948,7 @@ class TestFindBlossomAndNearestTp:
         runtime._token = None
         runtime._observe = MagicMock()
         g = HighLevelApi(ctx, runtime=runtime)
+        g.wait_scene = MagicMock(return_value=True)  # 确定性重置开图等待
 
         with (
             patch("abilities.navigation.map_ops.MapController.switch_to_ground_layer", return_value=False),
@@ -1971,6 +1972,7 @@ class TestFindBlossomAndNearestTp:
         runtime._token = None
         runtime._observe = MagicMock()
         g = HighLevelApi(ctx, runtime=runtime)
+        g.wait_scene = MagicMock(return_value=True)  # 确定性重置开图等待
 
         blossoms = [BlossomCandidate(screen_x=500, screen_y=300, blossom_type="revelation", score=0.8)]
         with (
@@ -1997,6 +1999,7 @@ class TestFindBlossomAndNearestTp:
         runtime._token = None
         runtime._observe = MagicMock()
         g = HighLevelApi(ctx, runtime=runtime)
+        g.wait_scene = MagicMock(return_value=True)  # 确定性重置开图等待
 
         blossoms = [BlossomCandidate(screen_x=960, screen_y=540, blossom_type="revelation", score=0.8)]
         viewport = (2000.0, -500.0)
@@ -2034,6 +2037,7 @@ class TestFindBlossomAndNearestTp:
         runtime._token = None
         runtime._observe = MagicMock()
         g = HighLevelApi(ctx, runtime=runtime)
+        g.wait_scene = MagicMock(return_value=True)  # 确定性重置开图等待
 
         # 两种花，revelation 更近
         blossoms = [
