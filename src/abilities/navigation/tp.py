@@ -456,6 +456,17 @@ class Teleporter:
             if dist < _MOVE_TOLERANCE:
                 break  # 目标进入容差 → 去点图标
 
+            # 远距预算封顶（2026-08-22 实机 r_060159：跨区目标导航 15 轮 ×60-100s
+            # 吃满任务 600s 预算，黑名单换花机制反而没机会跑。i>6 仍 >3000 →
+            # 干净失败交给上层换花，别烧完整个任务）
+            if i > 6 and dist > 3000.0:
+                ob.event("tp.navigate", ability="tp", phase="decide",
+                         ok=False, reason="nav_far_budget_exceeded",
+                         dist=round(dist), iter=i, target=target.name)
+                raise RuntimeError(
+                    f"导航 {i} 轮 dist 仍 {round(dist)}（远距预算封顶，换目标重试）"
+                )
+
             # dist 无进展检测：拖拽连续发出但 dist 不降 = 视口卡坏状态
             # （拖拽被吞/概览档残留/特殊视角），SIFT 却"正常"→ 原复位逻辑
             # （仅 SIFT 失败触发）永不命中。2026-08-15 实机：视口卡 (-68,1224)
