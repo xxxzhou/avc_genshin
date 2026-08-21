@@ -219,9 +219,20 @@ def _find_blossom(
 
     # 开地图（若已在 MAP 则跳过）
     if g.scene is None or g.scene.scene is not Scene.MAP:
+        ctx.ensure_foreground()  # M 键要焦点在游戏窗（2026-08-22 实机：静默开图失败）
         ctx.release_all_keys()
         g.press(KeyCode.m)
         if not g.wait_scene(Scene.MAP, timeout=8.0):
+            from framework.scene import classify_scene
+
+            frame = ctx.capture()
+            scene_now = classify_scene(frame).scene if frame is not None else None
+            ob = ctx.observe
+            ob.event(
+                "auto_ley_line.step", ability="auto_ley_line", phase="observe",
+                step="open_map", ok=False, reason="map_not_opened",
+                scene=str(scene_now), evidence=ob.save_evidence(ctx, "open_map_fail"),
+            )
             return None  # 开图失败，让上层判断
 
     try:
