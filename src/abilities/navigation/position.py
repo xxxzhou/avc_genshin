@@ -147,12 +147,15 @@ _MAPBACK_INFO_FILES = ["mapback_info.json", "mapback_6_0_info.json"]  # 分层�
 _BIG_MAP_ROI = (0, 0, 1600, 900)
 
 # 粗匹配局部搜索半径（color-px 单位，对照 BGI MiniMapMatchConfig.RoughSearchRadius=50）
-# ⚠ 2026-08-15 实机（走路段 avc corr.rows 崩溃）：局部搜索 = prev±50，当 prev 靠近
-# coarseMap 边界时 avc 内部 autoRoi&full 后 searchRoi < coarseSize(52) → 粗匹配
-# matchTemplate(52模板 > searchRoi) 触发 cv::crossCorr 断言崩溃（terminate 无法 catch）。
-# 改 0 = 禁用局部搜索 = 全图搜索 → searchRoi 恒为全图(≥52)，不崩。粗匹配模板仅 52×52，
-# 全图匹配开销可忽略；精匹配仍用 setSearchRadius 局部（prev 附近）。
-_ROUGH_SEARCH_RADIUS = 0
+# ⚠ 历史：2026-08-15 曾因 prev 靠近 coarseMap 边界时 searchRoi < coarseSize(52) 触发
+# cv::crossCorr 断言崩溃（terminate 无法 catch）而改 0（禁局部搜索）。
+# ⚠ 2026-08-22 实机（r_20260822_010303）暴露 radius=0 的代价：传送落地后小地图在
+# 相似地形上全图层假阳性（读数 [4149,4975] 离 prev (1669,284) 5000+ 单位，ok=True
+# 直接采纳）→ nav dist 2621↔5539 来回跳 → no_progress/abort_too_far。
+# 现恢复 50：avc 6cea222f 起 MapMatcher::match 已有 cv 异常装甲（断言 → lastError
+# 返回 0 不 terminate），边界崩溃路径变安全失败；Python 侧另加 local 结果距离
+# 合理性检查（见 _match），双保险。
+_ROUGH_SEARCH_RADIUS = 50
 
 # color-px → 世界单位（BGI: color webp 是 gray webp 的 1/5 缩略 → 1 color-px = 5 世界单位 at Scale=1）
 _COARSE_PIXEL_TO_WORLD = 5.0
@@ -196,9 +199,19 @@ class PositionGetter:
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
-        self._prev_x: float = 0
-        self._prev_y: float = 0
-        self._has_prev: bool = False
+        # prev 位置共享：各 ability（tp/navigator/fighter/verify）各建 PositionGetter
+        # 实例，若 prev 只存实例字段，teleport 种的种子到 navigator 就丢 → navigator
+        # 无 prev 走全图匹配 → 相似地形假阳性锁死（2026-08-22 实机 r_20260822_011309：
+        # 传送落地璃月 (1669,284)，navigator global 匹配到纳塔 [2585,9311] 锁死）。
+        # 提升为 ctx 级单一事实源，同 ctx 内所有实例互通。
+        shared = getattr(ctx, "_shared_pos_prev", None)
+        if isinstance(shared, tuple) and len(shared) == 2:
+            self._prev_x, self._prev_y = shared
+            self._has_prev = True
+        else:
+            self._prev_x: float = 0
+            self._prev_y: float = 0
+            self._has_prev: bool = False
         self._layers: list[_MapLayer] = []  # 多图层（懒加载）
         self._layers_initialized: bool = False
         self._prev_layer_idx: int = -1  # 上次匹配到的图层索引
@@ -249,6 +262,7 @@ class PositionGetter:
         if result is not None:
             self._prev_x, self._prev_y = result
             self._has_prev = True
+            self.ctx._shared_pos_prev = (self._prev_x, self._prev_y)
             return result
 
         return None
@@ -396,10 +410,14 @@ class PositionGetter:
             return None
 
     def set_prev_position(self, x: float, y: float) -> None:
-        """设置上次位置（用于局部匹配优化，对照 BGI Navigation.SetPrevPosition）。"""
+        """设置上次位置（用于局部匹配优化，对照 BGI Navigation.SetPrevPosition）。
+
+        同步写 ctx 共享态（见 __init__ 注释）——传送落点是全局最可靠的 prev 种子。
+        """
         self._prev_x = x
         self._prev_y = y
         self._has_prev = True
+        self.ctx._shared_pos_prev = (x, y)
 
     @property
     def prev_position(self) -> tuple[float, float] | None:
@@ -466,8 +484,17 @@ class PositionGetter:
                 result = self._match_layer(layer, mini156, mask, local=is_local)
                 if result is not None:
                     gx, gy, score = result
-                    # local 匹配（prev 附近）直接采纳
+                    # local 匹配（prev 附近）直接采纳——但 2026-08-22 实机发现
+                    # radius=0 时代 local 实为全图搜（见 _ROUGH_SEARCH_RADIUS 注释），
+                    # 假阳性会以 local 身份直接采纳。加与 global 回退同款的距离
+                    # 合理性检查：离 prev 太远且分数不够高 → 嫌疑假阳性，继续找。
                     if is_local:
+                        dist_to_prev = (
+                            (gx - self._prev_x) ** 2 + (gy - self._prev_y) ** 2
+                        ) ** 0.5
+                        if dist_to_prev > 1000.0 and score < 0.95:
+                            candidate_scores.append(score)
+                            continue
                         best_result = (gx, gy, idx)
                         sel_score = score
                         break
