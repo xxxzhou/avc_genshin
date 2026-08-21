@@ -380,21 +380,24 @@ class HighLevelApi:
         pg = PositionGetter(self.ctx)
         viewport = pg.get_position_from_big_map(frame)
         # 2.5 视口漂移守卫：地图记忆上次视图（任务间残留）。若视口中心远离玩家已知
-        # 位置（ctx._shared_pos_prev，传送种子/上次定位），说明在别人的视图上找花
-        # （2026-08-22 实机 r_20260822_012342：玩家在璃月，视口残留纳塔 → 找了纳塔的
-        # 花 → 跨区导航 600s 超时）→ M/M 复位到玩家中心重检一次。
+        # 位置（ctx._shared_pos_prev，传送种子/上次定位），或 prev 未知（每 run 首找，
+        # 2026-08-22 实机 r_20260822_015715：首找 prev=None 守卫被跳过，视图残留纳塔
+        # 又选了跨区花）→ M/M 复位到玩家中心重检一次。
         prev = getattr(self.ctx, "_shared_pos_prev", None)
-        if (
+        viewport_near_player = (
             viewport is not None
             and isinstance(prev, tuple)
             and len(prev) == 2
-            and math.hypot(viewport[0] - prev[0], viewport[1] - prev[1]) > 3000.0
-        ):
+            and math.hypot(viewport[0] - prev[0], viewport[1] - prev[1]) <= 3000.0
+        )
+        if viewport is not None and not viewport_near_player:
             self._observe("detect.blossom", ability="tp", phase="decide",
                           step="view_reset", ok=True,
-                          reason="viewport_far_from_player",
-                          viewport=(round(viewport[0]), round(viewport[1])),
-                          prev=(round(prev[0]), round(prev[1])))
+                          reason="viewport_far_from_player" if viewport is not None
+                          else "no_prev_reset_to_player",
+                          viewport=None if viewport is None
+                          else (round(viewport[0]), round(viewport[1])),
+                          prev=prev)
             self.ctx.release_all_keys()
             self.ctx.press(KeyCode.m)  # 关图
             utils.sleep(0.6)

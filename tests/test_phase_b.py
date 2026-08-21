@@ -1961,6 +1961,7 @@ class TestFindBlossomAndNearestTp:
 
         ctx = MagicMock()
         ctx.capture.return_value = MagicMock()
+        ctx._shared_pos_prev = (2000.0, -500.0)  # 视口近玩家，跳过复位分支
         runtime = MagicMock()
         runtime._token = None
         runtime._observe = MagicMock()
@@ -1993,6 +1994,7 @@ class TestFindBlossomAndNearestTp:
 
         blossoms = [BlossomCandidate(screen_x=960, screen_y=540, blossom_type="revelation", score=0.8)]
         viewport = (2000.0, -500.0)
+        ctx._shared_pos_prev = viewport  # 视口近玩家，跳过复位分支
         tp = TpPosition(id=1, type="TeleportWaypoint", name="蒙德城", country="蒙德",
                         areas=("坠星山谷",), x=2005.0, y=-490.0, tran_x=2005.0, tran_y=-490.0)
 
@@ -2032,6 +2034,7 @@ class TestFindBlossomAndNearestTp:
             BlossomCandidate(screen_x=200, screen_y=100, blossom_type="wealth", score=0.7),
         ]
         viewport = (2000.0, -500.0)
+        ctx._shared_pos_prev = viewport  # 视口近玩家，跳过复位分支
         tp = TpPosition(id=1, type="TeleportWaypoint", name="蒙德城", country="蒙德",
                         areas=("坠星山谷",), x=2005.0, y=-490.0, tran_x=2005.0, tran_y=-490.0)
 
