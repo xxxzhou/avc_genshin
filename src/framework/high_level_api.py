@@ -314,6 +314,16 @@ class HighLevelApi:
         # ⚠ 注意：放大时视口范围缩小，需先把花移到中心避免丢失。
         zoom = mc.measure_zoom_level(frame) or 3.0
         blossoms = mc.find_blossom_on_map(frame)
+        # 初始 0 花 → 拉宽到 4.4 重找一次（2026-08-22 实机 r_20260822_053721：
+        # 地图停留在紧 zoom 的区域视图，视野内本就无花，直接 set_zoom(3.0) 更紧
+        # → 全程 0 花误报"未检测到地脉花"）
+        if not blossoms and zoom < 4.2:
+            mc.set_zoom_level(4.4, frame)
+            utils.sleep(0.6)
+            frame = self.ctx._capture_sc()
+            if frame is not None:
+                zoom = mc.measure_zoom_level(frame) or 4.4
+                blossoms = mc.find_blossom_on_map(frame)
         self._observe("detect.blossom", ability="tp", phase="observe",
                       step="find_initial", zoom_measured=zoom,
                       count=len(blossoms), ok=len(blossoms) > 0,
