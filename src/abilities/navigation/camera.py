@@ -258,6 +258,7 @@ class CameraControl:
         from_pos: tuple[float, float],
         to_pos: tuple[float, float],
         max_diff: float = 3.0,
+        current_angle: float | None = None,
     ) -> float:
         """移动中朝目标点转相机（纯 move_by_rel，**不 nudge**）。返回未收敛的角度差。
 
@@ -266,11 +267,14 @@ class CameraControl:
         go_to 每轮调此方法持续转向（diag_moveto [B]：dist 单调下降、diff→0）。
         空闲态需用 ``rotate_to``（内含轻推同步）。
 
+        current_angle: 可选朝向覆盖（navigator 传运动方向朝向，免疫箭头 180° 翻转，
+        2026-08-22 实机山地蛇形案）；None 时读箭头。
+
         ⚠ 调用后须等相机旋转惯性结束再读朝向（约 1.5s，见 _SETTLE_S），
         否则读数是中间值 → diff 错误 → 过度旋转/振荡。
         """
         target_angle = CameraControl.target_orientation(from_pos, to_pos)
-        current = self.get_orientation()
+        current = current_angle if current_angle is not None else self.get_orientation()
         if current is None:
             return 0.0
         diff = self._angle_diff(current, target_angle)

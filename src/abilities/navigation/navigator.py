@@ -98,6 +98,12 @@ class Navigator:
         pos_fail_streak = 0
         too_far_count = 0
         sprint = False  # run/dash 冲刺（finally 释放用）
+        # 运动方向朝向（2026-08-22 实机 r_20260822_024330：山地箭头朝向读数 ±180°
+        # 翻转 → 转向来回修正蛇形。位置增量 ≥60 单位推运动朝向，5s 内新鲜则优先于
+        # 箭头读数——位置已修稳（ctx 共享 prev + local 半径），运动方向无 180 歧义）
+        move_heading: float | None = None
+        move_heading_t = 0.0
+        last_move_pos: tuple[float, float] | None = None
 
         try:
             # 移动模式: fly 先跳起进滑翔; climb 跳过卡死脱困(攀爬中不脱困)
@@ -268,7 +274,20 @@ class Navigator:
 
                 # 朝向（提前算，供观察事件 + 转向决策复用，避免双读 compass）
                 target_angle = CameraControl.target_orientation(position, (waypoint.x, waypoint.y))
-                current_angle = self._camera.get_orientation()
+                # 运动朝向更新：位移 ≥60 单位才够准（<噪声），随位移刷新
+                if last_move_pos is not None:
+                    _md = CameraControl.distance(last_move_pos, position)
+                    if _md >= 60.0:
+                        move_heading = CameraControl.target_orientation(last_move_pos, position)
+                        move_heading_t = time.monotonic()
+                        last_move_pos = position
+                else:
+                    last_move_pos = position
+                # 新鲜运动朝向（<5s）优先；否则退箭头读数
+                if move_heading is not None and time.monotonic() - move_heading_t < 5.0:
+                    current_angle = move_heading
+                else:
+                    current_angle = self._camera.get_orientation()
                 heading_diff = (
                     round(self._camera._angle_diff(current_angle, target_angle), 1)
                     if current_angle is not None else None
@@ -375,8 +394,12 @@ class Navigator:
                         except Exception:
                             pass
                     else:
-                        # 小角度差：移动中纯相机旋转（不 nudge、不打断 W）
-                        self._camera.rotate_camera_to_target(position, (waypoint.x, waypoint.y))
+                        # 小角度差：移动中纯相机旋转（不 nudge、不打断 W）；
+                        # 传运动朝向覆盖（免疫箭头 180° 翻转）
+                        self._camera.rotate_camera_to_target(
+                            position, (waypoint.x, waypoint.y),
+                            current_angle=current_angle,
+                        )
 
                 time.sleep(_STEER_SLEEP_S)
 
