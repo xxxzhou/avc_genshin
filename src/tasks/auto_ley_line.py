@@ -64,52 +64,92 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) 
     ob = ctx.observe
     done = 0
     last_info: dict | None = None
+    # 失败花黑名单：山地/悬崖花 go_to 不收敛时换花重试，不死磕一朵
+    # （2026-08-22 实机：奥藏山花 cam.rotate 30s×3 失败 dist 卡 230-290 不收敛）
+    blacklist: list[tuple[float, float]] = []
+    MAX_BLOSSOM_ATTEMPTS = 3  # 每轮最多换 3 朵花
+
+    class _BlossomRetry(Exception):
+        """换花重试信号（黑名单当前花）。"""
 
     while count == 0 or done < count:
         itr = done + 1
-        # 1. 动态找花（每次循环都重新找，花被领奖后消失）
-        info = _find_blossom(ctx, g, flower_type=flower_type, iter=itr)
-        if info is None:
-            if done == 0:
-                raise TaskError(f"地图上未检测到地脉花（flower_type={flower_type!r}）")
-            raise NormalEnd(f"地图上无更多地脉花，已完成 {done} 次")
-        last_info = info
-        ob.event(
-            "auto_ley_line.step", ability="auto_ley_line", phase="observe",
-            step="find_blossom", iter=itr, ok=True,
-            blossom_type=info["blossom_type"],
-            blossom_pos=tuple(round(v) for v in info["blossom_pos"]),
-            nearest_tp=info["nearest_tp"].name,
-            evidence=ob.save_evidence(ctx, f"find_blossom_iter{itr}"),
-        )
-
-        # 2. 传送到最近点（teleport_to 内部自动开关地图）
-        # ⚠ 2026-08-15 实机：同名「传送锚点」大量存在，按名解析歧义（曾落到群玉阁）
-        # → 改传坐标（TpPosition.tran_x/tran_y）。
-        tp_pt = info["nearest_tp"]
-        g.teleport_to((tp_pt.tran_x, tp_pt.tran_y))
-        ob.event(
-            "auto_ley_line.step", ability="auto_ley_line", phase="act",
-            step="teleport", iter=itr, ok=True,
-            target=f"{tp_pt.name}@({tp_pt.tran_x:.0f},{tp_pt.tran_y:.0f})",
-            evidence=ob.save_evidence(ctx, f"teleport_landed_iter{itr}"),
-        )
-
-        # 3. 走到花（容差大一点，花本身有 F 交互范围）
-        g.go_to(info["blossom_pos"], tolerance=8.0, timeout=120.0)
-        ob.event(
-            "auto_ley_line.step", ability="auto_ley_line", phase="act",
-            step="go_to_blossom", iter=itr, ok=True,
-            evidence=ob.save_evidence(ctx, f"arrived_blossom_iter{itr}"),
-        )
-
-        # 4. 激活地脉花
-        if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=60):
+        for attempt in range(1, MAX_BLOSSOM_ATTEMPTS + 1):
+            # 1. 动态找花（每次循环都重新找，花被领奖后消失；失败花进黑名单跳过）
+            info = _find_blossom(
+                ctx, g, flower_type=flower_type, iter=itr, exclude=blacklist
+            )
+            if info is None:
+                if done == 0 and not blacklist:
+                    raise TaskError(
+                        f"地图上未检测到地脉花（flower_type={flower_type!r}）"
+                    )
+                if not blacklist:
+                    raise NormalEnd(f"地图上无更多地脉花，已完成 {done} 次")
+                raise TaskError(
+                    f"黑名单内外的花均不可用（已拉黑 {len(blacklist)} 朵，完成 {done} 次）"
+                )
+            last_info = info
             ob.event(
                 "auto_ley_line.step", ability="auto_ley_line", phase="observe",
-                step="flower_wait", iter=itr, ok=False, reason="no_flower_icon",
+                step="find_blossom", iter=itr, attempt=attempt, ok=True,
+                blossom_type=info["blossom_type"],
+                blossom_pos=tuple(round(v) for v in info["blossom_pos"]),
+                nearest_tp=info["nearest_tp"].name,
+                evidence=ob.save_evidence(ctx, f"find_blossom_iter{itr}_try{attempt}"),
             )
-            raise TaskError(f"未检测到地脉花交互提示（iter={itr}）")
+
+            try:
+                # 2. 传送到最近点（teleport_to 内部自动开关地图）
+                # ⚠ 2026-08-15 实机：同名「传送锚点」大量存在，按名解析歧义（曾落到
+                # 群玉阁）→ 改传坐标（TpPosition.tran_x/tran_y）。
+                tp_pt = info["nearest_tp"]
+                g.teleport_to((tp_pt.tran_x, tp_pt.tran_y))
+                ob.event(
+                    "auto_ley_line.step", ability="auto_ley_line", phase="act",
+                    step="teleport", iter=itr, attempt=attempt, ok=True,
+                    target=f"{tp_pt.name}@({tp_pt.tran_x:.0f},{tp_pt.tran_y:.0f})",
+                    evidence=ob.save_evidence(
+                        ctx, f"teleport_landed_iter{itr}_try{attempt}"
+                    ),
+                )
+
+                # 3. 走到花（容差大一点，花本身有 F 交互范围）
+                if not g.go_to(info["blossom_pos"], tolerance=8.0, timeout=120.0):
+                    raise _BlossomRetry("go_to_timeout")
+                ob.event(
+                    "auto_ley_line.step", ability="auto_ley_line", phase="act",
+                    step="go_to_blossom", iter=itr, attempt=attempt, ok=True,
+                    evidence=ob.save_evidence(
+                        ctx, f"arrived_blossom_iter{itr}_try{attempt}"
+                    ),
+                )
+
+                # 4. 激活地脉花
+                if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=60):
+                    ob.event(
+                        "auto_ley_line.step", ability="auto_ley_line",
+                        phase="observe", step="flower_wait", iter=itr,
+                        attempt=attempt, ok=False, reason="no_flower_icon",
+                    )
+                    raise _BlossomRetry("no_flower_icon")
+                break  # 到位且有交互提示 → 出重试循环去激活
+            except (_BlossomRetry, TaskError) as e:
+                # 换花重试：go_to 不收敛 / 无交互提示 / 传送失败 / 走路阵亡（复活后
+                # 换下一朵，连败 3 朵再整体失败归因）。NormalEnd 不在此列。
+                blacklist.append(info["blossom_pos"])
+                ob.event(
+                    "auto_ley_line.step", ability="auto_ley_line", phase="decide",
+                    step="blacklist_blossom", iter=itr, attempt=attempt,
+                    ok=False, reason=f"{type(e).__name__}:{e}",
+                    blossom_pos=tuple(round(v) for v in info["blossom_pos"]),
+                    blacklisted=len(blacklist),
+                )
+        else:
+            raise TaskError(
+                f"连续 {MAX_BLOSSOM_ATTEMPTS} 朵花均失败（黑名单 {len(blacklist)} 朵）"
+            )
+
         g.press(KeyCode.f)
         ob.event(
             "auto_ley_line.step", ability="auto_ley_line", phase="act",
@@ -164,7 +204,10 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) 
 # ── 内部：找花（开图 → find_blossom → 关图）──
 
 
-def _find_blossom(ctx, g, *, flower_type: str = "", iter: int = 0) -> dict | None:
+def _find_blossom(
+    ctx, g, *, flower_type: str = "", iter: int = 0,
+    exclude: list | None = None,
+) -> dict | None:
     """开地图找花，返回 ``find_blossom_and_nearest_tp`` 结果或 None。负责开/关地图。
 
     ``find_blossom_and_nearest_tp`` 要求在 MAP scene 调用（high_level_api.py:273 docstring）。
@@ -181,7 +224,7 @@ def _find_blossom(ctx, g, *, flower_type: str = "", iter: int = 0) -> dict | Non
             return None  # 开图失败，让上层判断
 
     try:
-        info = g.find_blossom_and_nearest_tp(flower_type=flower_type)
+        info = g.find_blossom_and_nearest_tp(flower_type=flower_type, exclude=exclude)
     finally:
         # 不管找没找到，都关地图回 MAIN_UI（teleport_to 自己会再开图）
         ctx.release_all_keys()

@@ -277,7 +277,9 @@ class HighLevelApi:
         self._observe("action", action="teleport_to", target=str(name_or_pos))
         return result
 
-    def find_blossom_and_nearest_tp(self, flower_type: str = "") -> dict | None:
+    def find_blossom_and_nearest_tp(
+        self, flower_type: str = "", exclude: list | None = None
+    ) -> dict | None:
         """在大地图上找地脉花，返回花信息和最近传送点。
 
         需在 MAP 场景下调用（由调用方保证先打开地图）。
@@ -285,6 +287,8 @@ class HighLevelApi:
 
         Args:
             flower_type: 筛选花类型，""=不限，"revelation"=启示之花，"wealth"=藏金之花
+            exclude: 花位置黑名单 [(x,y),...]——距黑名单点 <500 单位的花跳过
+                （失败换花重试用，如山地花走不到）
 
         Returns:
             {"blossom_type": str, "blossom_pos": (x,y), "nearest_tp": TpPosition, "screen_pos": (x,y)}
@@ -427,7 +431,24 @@ class HighLevelApi:
         if zoom is None:
             zoom = 3.0  # 兜底默认
 
-        # 4. 取最近视口中心的花，转游戏坐标
+        # 4. 取最近视口中心的花，转游戏坐标（exclude=失败黑名单：距这些位置
+        # <500 单位的花跳过——2026-08-22 实机奥藏山山地花旋转 30s×3 失败走不到，
+        # 换花重试比死磕一朵地形差的花划算）
+        if exclude:
+            def _excluded(b) -> bool:
+                gp = mc.screen_to_game(b.screen_x, b.screen_y, viewport, zoom)
+                return any(math.hypot(gp[0] - ex[0], gp[1] - ex[1]) < 500.0 for ex in exclude)
+            before = len(blossoms)
+            blossoms = [b for b in blossoms if not _excluded(b)]
+            if before != len(blossoms):
+                self._observe("detect.blossom", ability="tp", phase="decide",
+                              step="exclude_blacklist", ok=True,
+                              excluded=before - len(blossoms), remaining=len(blossoms))
+        if not blossoms:
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="all_excluded", ok=False, reason="all_blossoms_blacklisted")
+            return None
+
         best = blossoms[0]
         game_pos = mc.screen_to_game(best.screen_x, best.screen_y, viewport, zoom)
 
