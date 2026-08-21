@@ -174,7 +174,10 @@ _MAX_NAV_ITER = 30  # 拖拽循环最大迭代数（BGI MaxIterations）
 _MAX_NAV_FAILS = 3  # 连续 SIFT 定位失败上限 → 触发地图复位
 _MAP_RESET_LIMIT = 3  # 地图复位（M 关/开图）上限，超过仍失败 → 中止
 _NAV_NO_PROGRESS_LIMIT = 5  # 拖拽后 dist 连续 N 轮不降 → 复位地图视图（卡坏状态）
-_MOVE_TOLERANCE = 200.0  # 目标进入容差即停止拖拽（game 单位，BGI Tolerance）
+_MOVE_TOLERANCE = 500.0  # 目标进入容差即停止拖拽（game 单位，BGI Tolerance）
+# ⚠ 2026-08-22 实机（r_20260822_052350）：近距（dist<1500）SIFT 噪声 ±500 致拖拽
+# 过头来回修正（322↔1618 震荡 22 轮耗尽预算）。200→500：dist<500 即停拖，交给
+# 图标匹配+面板确认（icon 候选按距中心排序 + pin 重试已验证可靠）。
 _MAP_ZOOM_OUT_DISTANCE = 1500.0  # 远距先缩小阈值（game 单位，≈BGI MapZoomOutDistance 1000px@zoom4）
 _TELEPORT_MAX_ZOOM = 6.0  # 最大缩小档（BGI TeleportMaxZoomLevel）
 _TRAVEL_ZOOM_CAP = 5.5  # 导航缩放上限：≥5.7 为全图概览档（无平移余量，勿进）
