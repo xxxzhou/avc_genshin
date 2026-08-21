@@ -114,8 +114,9 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) 
                     ),
                 )
 
-                # 3. 走到花（容差大一点，花本身有 F 交互范围）
-                if not g.go_to(info["blossom_pos"], tolerance=8.0, timeout=120.0):
+                # 3. 走到花（容差 25：r_20260822_025353 实机 dist 52-137 绕花打转——
+                # 容差 8 过紧，到达 F 交互圈边缘即停比穿过花心再折返稳）
+                if not g.go_to(info["blossom_pos"], tolerance=25.0, timeout=150.0):
                     raise _BlossomRetry("go_to_timeout")
                 ob.event(
                     "auto_ley_line.step", ability="auto_ley_line", phase="act",
