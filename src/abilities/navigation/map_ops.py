@@ -370,7 +370,33 @@ class MapController:
         if rect is None:
             return False
         self.ctx.click_at(rect.cx, rect.cy)
-        utils.sleep(0.4)
+        utils.sleep(0.5)
+        # ⚠ 2026-08-22 实机（r_061848）：该模板在当前版本会误中「地图设置」按钮——
+        # 点击打开设置面板（OCR 实证『地图设置/寻找牌手』），其下可能还叠着
+        # 『总标记』标记管理面板。实测关闭序列：设置面板→点面板外(600,500)；
+        # 标记面板→点右下『确认』(~1660,997)。关干净后返回 False（无层可切）。
+        f2 = self.ctx._capture_sc() if hasattr(self.ctx, "_capture_sc") else None
+        if f2 is not None:
+            settings = vu.find_text(
+                self.ctx, "地图设置", roi=(1300, 60, 620, 80), frame=f2
+            )
+            if settings is not None:
+                self.ctx.click_at(600, 500)  # 点面板外关设置
+                utils.sleep(0.6)
+                f3 = self.ctx._capture_sc()
+                if f3 is not None:
+                    marker_confirm = vu.find_text(
+                        self.ctx, "确认", roi=(1560, 950, 360, 100), frame=f3
+                    )
+                    if marker_confirm is not None:
+                        self.ctx.click_at(marker_confirm.cx, marker_confirm.cy)
+                        utils.sleep(0.5)
+                self.ctx.observe.event(
+                    "map.layer_switch", ability="tp", phase="act",
+                    ok=False, reason="wrong_button_settings_opened",
+                    throttle_key="map.layer_switch",
+                )
+                return False
         return True
 
     # ── 国家切换 ──
