@@ -59,7 +59,11 @@ _TPL = {
     "resurrection": ("template_eat", "Resurrection.png"),
     # Chest
     "chest_f": ("template_chest", "chest_F_icon.png"),
-    "flower_f": ("template_chest", "flower_F_icon.png"),
+    # ⚠ 2026-08-22 实机：BGI 官方 flower_F_icon.png（41×19 药丸）在实机渲染下
+    # 真提示仅 ~0.46-0.62（has_flower_f_icon 60s 全漏 → auto_ley_line no_flower_icon）。
+    # 改实机裁剪 F 按钮方块（36×36，跨交互类型不变）：正例 1.0 / 无提示帧 0.62，
+    # 0.8 阈值干净（r_20260822_003648 标定）。
+    "flower_f": ("template_chest", "flower_F_btn_live.png"),
     "chest_icon": ("template_chest", "chest.png"),
     # Teleport
     "map_scale_btn": ("template_teleport", "MapScaleButton.png"),
