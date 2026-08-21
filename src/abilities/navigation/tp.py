@@ -495,7 +495,9 @@ class Teleporter:
                 zoom = mc.measure_zoom_level(frame) or zoom
 
             mc.drag_map(dx, dy, zoom)
-            utils.sleep(0.3)
+            # 拖拽惯性 settle（2026-08-22 实机 r_20260822_034136：0.3s SIFT 跑在还在
+            # 滑动的地图上 → dist 1872↔5886 乱跳来回拖 → 马拉松）
+            utils.sleep(0.8)
             frame = self.ctx.capture()
 
         # 4. 放大到 DisplayTpPointZoomLevel 让传送点图标显示
