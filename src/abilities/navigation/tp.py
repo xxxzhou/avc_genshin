@@ -163,7 +163,10 @@ _MAP_CENTER_Y = 540
 _CLICK_SAFE_MARGIN = 35  # 距屏幕边缘安全距离
 _MAP_UI_OVERLAY_W = 360  # 左上角 UI 覆盖区域宽
 _MAP_UI_OVERLAY_H = 400  # 左上角 UI 覆盖区域高
-_TELEPORT_RETRY_COUNT = 3
+# ⚠ 2026-08-22 实机（r_20260822_023332）：目标锚点被玩家自定义标记 pin 覆盖
+# （panel=MARKER ×3 连 pin_blocking 放弃）→ 扩到 6 个候选图标，跳过被 pin
+# 盖住的锚点换稍远的干净锚点。
+_TELEPORT_RETRY_COUNT = 6
 _TELEPORT_WAIT_MAIN_UI_TIMEOUT = 60.0  # 传送完成后等待主界面的超时(秒)
 
 # 导航循环（对照 BGI MoveMapToCore）

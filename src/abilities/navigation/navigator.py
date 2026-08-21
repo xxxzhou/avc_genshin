@@ -49,8 +49,10 @@ _JUMP_INTERVAL_S = 2.0  # jump 移动模式周期跳间隔
 # 角度差超过此值时停步闭环转向。2026-08-15 实机定论：**停步式 rotate_to 依赖
 # nudge W 同步面朝，角色被地形挡住时 nudge 无效 → 读数不更新 → max_attempts 空转**
 # （+300px×5 实测 Δ≈0°@撞墙位）。走路中面朝自动同步相机，rotate_camera_to_target
-# 可靠（diag_moveto 已证）。故阈值取 90：仅严重反向才停步，其余边走边转。
-_REORIENT_THRESHOLD = 90.0
+# 可靠（diag_moveto 已证）。⚠ 2026-08-22 实机（r_20260822_023332）：90 阈值下
+# 山地段 140-170° 停步旋转 30s×3 连败吃满 go_to 预算 → 提到 150：仅近反向才停步，
+# 其余全走移动中旋转（已证收敛），停步轮也轻量化（下 方 for 循环）。
+_REORIENT_THRESHOLD = 150.0
 _POS_FAIL_STREAK_DEATH_CHECK = 5  # 连续定位失败 N 次后查死亡面板（全队阵亡黑屏→小地图必失败）
 
 
@@ -343,11 +345,11 @@ class Navigator:
                         # nudge_sync 会推动角色前进，位置漂移后 target_angle 变化，
                         # 故 rotate_to 完成后须重新读位置算 target_angle，
                         # 若仍 > REORIENT 则继续转向（而非回主循环触发又一轮停步-转向）
-                        for _reorient in range(3):  # 最多 3 轮闭环（2026-08-15：10 轮站桩过久）
+                        for _reorient in range(2):  # 最多 2 轮闭环（2026-08-22：3 轮×30s 山地连败过烧；失败交给移动中旋转）
                             if _reorient == 0:
                                 prev_diff = 360.0  # 收敛趋势基线（首次必不触发"没收窄"）
-                            # max_attempts=8（2026-08-12 P2：默认 5 不够；15 过慢）
-                            self._camera.rotate_to(target_angle, max_diff=5.0, max_attempts=8)
+                            # max_attempts=4 轻量（2026-08-22：8 次站桩 ~30s 一轮太贵）
+                            self._camera.rotate_to(target_angle, max_diff=5.0, max_attempts=4)
                             # 重新读位置算 target_angle
                             new_pos = self._position_getter.get_position()
                             if new_pos is not None:
@@ -360,7 +362,7 @@ class Navigator:
                             if new_diff <= _REORIENT_THRESHOLD:
                                 break
                             # diff 收敛趋势检测（subagent P2）：连续 3 轮 diff 没收窄 → break 避免空烧
-                            if _reorient >= 2 and new_diff >= prev_diff - 1.0:
+                            if _reorient >= 1 and new_diff >= prev_diff - 1.0:
                                 ob.event("nav.step", ability="nav", phase="observe",
                                          target=target_xy, pos=(round(position[0]), round(position[1])),
                                          dist=round(CameraControl.distance(position, (waypoint.x, waypoint.y))),
