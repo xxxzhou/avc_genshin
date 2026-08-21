@@ -104,6 +104,7 @@ class Navigator:
         move_heading: float | None = None
         move_heading_t = 0.0
         last_move_pos: tuple[float, float] | None = None
+        last_fight_check = start_time  # 途中遇敌检查节流
 
         try:
             # 移动模式: fly 先跳起进滑翔; climb 跳过卡死脱困(攀爬中不脱困)
@@ -352,6 +353,34 @@ class Navigator:
                     except Exception:
                         pass
                     last_jump = time.monotonic()
+
+                # 途中遇敌：停步打完再走（path_executor._fight_if_in_combat 的 navigator
+                # 级下沉——auto_ley_line 等直接 g.go_to 的调用方途中遇敌同样会被围殴
+                # 站桩，2026-08-22 实机 r_20260822_005602 落地 3s 团灭案）。2s 节流读
+                # shared.scene，COMBAT 才开打，零常开销。
+                if self.g is not None and time.monotonic() - last_fight_check >= 2.0:
+                    last_fight_check = time.monotonic()
+                    from framework.scene import Scene
+
+                    _sc = getattr(self.g.scene, "scene", None) if self.g.scene else None
+                    if _sc is Scene.COMBAT:
+                        try:
+                            self.ctx.ic.keyUp(KeyCode.w)
+                        except Exception:
+                            pass
+                        ob.event("nav.fight", ability="nav", phase="decide",
+                                 target=target_xy, dist=round(dist),
+                                 reason="combat_during_walk")
+                        try:
+                            self.g.fight_until_clear(timeout=120)
+                        except Exception as e:
+                            ob.event("nav.fight", ability="nav", phase="act",
+                                     ok=False, reason=repr(e))
+                        try:
+                            self.ctx.ic.keyDown(KeyCode.w)
+                        except Exception:
+                            pass
+                        continue
 
                 # 转向：复用上方算的 current_angle/target_angle/heading_diff
                 if current_angle is not None:
