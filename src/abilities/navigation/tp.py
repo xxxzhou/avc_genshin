@@ -327,6 +327,10 @@ class Teleporter:
         self.ctx.press(KeyCode.m)
         # 等待 MAP 场景
         self.g.wait_scene(Scene.MAP, timeout=10.0)
+        # 开图动画 settle（2026-08-22 实机 r_20260822_031847：wait_scene 过早返回，
+        # SIFT 跑在半开的地图上 → 全图匹配假阳性 dist 6459（目标距玩家仅 60）→
+        # 拖拽马拉松。实证：settle 1.5s 后 SIFT 精准）
+        utils.sleep(1.0)
 
     def _reset_map_view(self) -> None:
         """大地图视口复位：SIFT 连续定位失败（视口漂到海洋/未开放区）时，
