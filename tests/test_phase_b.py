@@ -1950,6 +1950,7 @@ class TestFindBlossomAndNearestTp:
         g = HighLevelApi(ctx, runtime=runtime)
 
         with (
+            patch("abilities.navigation.map_ops.MapController.switch_to_ground_layer", return_value=False),
             patch("abilities.navigation.map_ops.MapController.find_blossom_on_map", return_value=[]),
             patch("abilities.navigation.map_ops.MapController.measure_zoom_level", return_value=3.0),
             patch("abilities.navigation.map_ops.MapController.set_zoom_level", return_value=3.0),
@@ -1973,6 +1974,7 @@ class TestFindBlossomAndNearestTp:
 
         blossoms = [BlossomCandidate(screen_x=500, screen_y=300, blossom_type="revelation", score=0.8)]
         with (
+            patch("abilities.navigation.map_ops.MapController.switch_to_ground_layer", return_value=False),
             patch("abilities.navigation.map_ops.MapController.find_blossom_on_map", return_value=blossoms),
             patch("abilities.navigation.map_ops.MapController.measure_zoom_level", return_value=3.0),
             patch("abilities.navigation.map_ops.MapController.set_zoom_level", return_value=3.0),
@@ -2003,6 +2005,7 @@ class TestFindBlossomAndNearestTp:
                         areas=("坠星山谷",), x=2005.0, y=-490.0, tran_x=2005.0, tran_y=-490.0)
 
         with (
+            patch("abilities.navigation.map_ops.MapController.switch_to_ground_layer", return_value=False),
             patch("abilities.navigation.map_ops.MapController.find_blossom_on_map", return_value=blossoms),
             patch("abilities.navigation.map_ops.MapController.measure_zoom_level", return_value=3.0),
             patch("abilities.navigation.map_ops.MapController.set_zoom_level", return_value=3.0),
@@ -2043,6 +2046,7 @@ class TestFindBlossomAndNearestTp:
                         areas=("坠星山谷",), x=2005.0, y=-490.0, tran_x=2005.0, tran_y=-490.0)
 
         with (
+            patch("abilities.navigation.map_ops.MapController.switch_to_ground_layer", return_value=False),
             patch("abilities.navigation.map_ops.MapController.find_blossom_on_map", return_value=blossoms),
             patch("abilities.navigation.map_ops.MapController.measure_zoom_level", return_value=3.0),
             patch("abilities.navigation.map_ops.MapController.set_zoom_level", return_value=3.0),
