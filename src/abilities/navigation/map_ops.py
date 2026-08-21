@@ -156,12 +156,15 @@ class MapController:
 
         匹配缩放滑块旋钮（MapScaleButton）Y 位置 → zoom_level。
         对照 BGI GetBigMapScale/GetBigMapZoomLevel。
+        ⚠ 2026-08-22 实机（05:15）：概览档/过渡态渲染下模板分从 0.9 掉到 0.42
+        → 阈值 0.8 全漏、zoom 永远测不到（地图卡概览档全链失效）。降 0.55 +
+        ROI 扩到整条滑轨（极档位旋钮超出原窄条）；窄条内假阳性风险可忽略。
         """
         rect = vu.find_template(
             self.ctx,
             "teleport/MapScaleButton.png",
-            threshold=0.8,
-            roi=_ZOOM_BTN_ROI,
+            threshold=0.55,
+            roi=(20, 360, 80, 440),
             frame=frame,
         )
         if rect is None:
@@ -175,9 +178,32 @@ class MapController:
 
     def set_zoom_level(self, target_zoom: float, frame=None) -> float | None:
         """滚轮缩放到目标 zoom_level（±容差）。返回最终 zoom 或 None（测不到）。"""
+        # ⚠ 滚轮作用于光标位置（2026-08-22 实机 05:14）：光标停在滑轨/面板/UI 元素
+        # 上时滚轮全被吞（盲滚 30 槽 zoom 不动）。发轮前一律把光标归到地图中心。
+        try:
+            sx, sy = self.ctx.to_screen(_MAP_CENTER_X, _MAP_CENTER_Y)
+            self.ctx.ic.moveTo(int(sx), int(sy))
+        except Exception:
+            pass
         cur = self.measure_zoom_level(frame)
         if cur is None:
-            return None
+            # 盲缩兜底（2026-08-22 实机 05:00）：概览档（z≥5.7 全大陆视图）下滑块
+            # 旋钮超出标定 Y 范围/模板分骤降 → measure 返回 None → 原实现直接放弃，
+            # 地图永远卡概览档（find_blossom 全链失效）。朝放大方向盲滚 3×10 槽，
+            # 每轮重测。
+            for _ in range(3):
+                for _n in range(10):
+                    # 放大方向（实测标定：scroll(0,-1) 使 measured zoom 增大=放大；
+                    # 概览档滑块在顶部，唯一出路是放大）
+                    self.ctx.ic.scroll(0, _ZOOM_WHEEL_SIGN)
+                    utils.sleep(0.05)
+                utils.sleep(0.4)
+                frame = self.ctx.capture()
+                cur = self.measure_zoom_level(frame)
+                if cur is not None:
+                    break
+            if cur is None:
+                return None
         for _ in range(_MAX_ZOOM_ATTEMPTS):
             diff = target_zoom - cur
             if abs(diff) <= _ZOOM_TOLERANCE:
