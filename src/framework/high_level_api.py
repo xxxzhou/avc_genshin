@@ -393,10 +393,8 @@ class HighLevelApi:
         if viewport is not None and not viewport_near_player:
             self._observe("detect.blossom", ability="tp", phase="decide",
                           step="view_reset", ok=True,
-                          reason="viewport_far_from_player" if viewport is not None
-                          else "no_prev_reset_to_player",
-                          viewport=None if viewport is None
-                          else (round(viewport[0]), round(viewport[1])),
+                          reason="viewport_far_from_player",
+                          viewport=(round(viewport[0]), round(viewport[1])),
                           prev=prev)
             self.ctx.release_all_keys()
             self.ctx.press(KeyCode.m)  # 关图
@@ -405,17 +403,55 @@ class HighLevelApi:
             if not self.wait_scene(Scene.MAP, timeout=8.0):
                 return None
             utils.sleep(0.5)
+            # 复位后 zoom 停在 3.0 视野太窄（r_20260822_022831：重检 0 花误报"无花"）
+            # → 回宽视野 4.4 找花 → 居中最近花 → 再放大 3.0 → 重试检测（同主流程）
             frame = self.ctx._capture_sc()
             if frame is None:
                 return None
+            mc.set_zoom_level(4.4, frame)
+            utils.sleep(0.5)
+            frame = self.ctx._capture_sc()
             found = mc.find_blossom_on_map(frame)
             if flower_type:
                 found = [b for b in found if b.blossom_type == flower_type]
+            self._observe("detect.blossom", ability="tp", phase="observe",
+                          step="find_after_reset_wide", count=len(found),
+                          ok=len(found) > 0)
             if not found:
                 evidence = self._save_evidence("find_blossom_after_reset_no_match")
                 self._observe("detect.blossom", ability="tp", phase="observe",
                               step="find_after_reset", ok=False,
                               reason="no_blossom_after_view_reset",
+                              evidence=evidence)
+                return None
+            # 居中最近花再放大（同主流程 1.x 段）
+            best0 = found[0]
+            zoom0 = mc.measure_zoom_level(frame) or 4.4
+            nd = (MAP_CENTER_Y - best0.screen_y) * zoom0 / MAP_SCALE_FACTOR
+            wd = (MAP_CENTER_X - best0.screen_x) * zoom0 / MAP_SCALE_FACTOR
+            if abs(nd) > 100 or abs(wd) > 100:
+                mc.drag_map(nd, wd, zoom0)
+                utils.sleep(0.3)
+                frame = self.ctx._capture_sc()
+                if frame is None:
+                    return None
+            mc.set_zoom_level(3.0, frame)
+            found = []
+            for attempt in range(5):
+                utils.sleep(0.7 if attempt else 0.4)
+                frame = self.ctx._capture_sc()
+                if frame is None:
+                    continue
+                found = mc.find_blossom_on_map(frame)
+                if flower_type:
+                    found = [b for b in found if b.blossom_type == flower_type]
+                if found:
+                    break
+            if not found:
+                evidence = self._save_evidence("find_blossom_after_reset_no_match_zoom")
+                self._observe("detect.blossom", ability="tp", phase="observe",
+                              step="find_after_reset_zoom", ok=False,
+                              reason="no_blossom_after_reset_zoom",
                               evidence=evidence)
                 return None
             blossoms = found
