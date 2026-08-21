@@ -308,6 +308,18 @@ class HighLevelApi:
                           step="capture_initial", ok=False, reason="no_frame")
             return None
 
+        # ★ 切回地面层（2026-08-22 实机 r_061412：地图记忆残留**地下层**视图（层岩
+        # 巨渊地下矿区），地下渲染下花模板 0 命中 + SIFT 拿地下图匹配地表 256 底图
+        # 全是假象（漂移守卫被骗过）。tp.navigate 开头有切层，找花流程漏了）
+        grounded = mc.switch_to_ground_layer(frame)
+        if grounded:
+            utils.sleep(0.6)
+            frame = self.ctx._capture_sc()
+            if frame is None:
+                return None
+            self._observe("detect.blossom", ability="tp", phase="act",
+                          step="switch_to_ground", ok=True)
+
         # ★ 调整缩放到固定等级再检测（BGI LocateLeyLineOutcrop 做法）
         # 高 zoom 下 SIFT 误差被放大，坐标偏移大→选错传送点。
         # 调到 ~3.0 后花图标仍可见，误差放大系数减小。
