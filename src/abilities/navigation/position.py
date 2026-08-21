@@ -146,6 +146,11 @@ _MAPBACK_INFO_FILES = ["mapback_info.json", "mapback_6_0_info.json"]  # 分层�
 # 大图视口 ROI（大图打开时地图内容区，1080p；实机验证边界）
 _BIG_MAP_ROI = (0, 0, 1600, 900)
 
+# 提瓦特有效游戏坐标范围（SIFT 鬼坐标拒收用；七国中心极值 ± 冗余：
+# 枫丹 x≈3631 / 稻妻 x≈-3050；挪德卡莱 y≈9542 / 稻妻 y≈-4400）
+_TEYVAT_BOUNDS_X = (-6000.0, 7000.0)
+_TEYVAT_BOUNDS_Y = (-8000.0, 12000.0)
+
 # 粗匹配局部搜索半径（color-px 单位，对照 BGI MiniMapMatchConfig.RoughSearchRadius=50）
 # ⚠ 历史：2026-08-15 曾因 prev 靠近 coarseMap 边界时 searchRoi < coarseSize(52) 触发
 # cv::crossCorr 断言崩溃（terminate 无法 catch）而改 0（禁局部搜索）。
@@ -333,6 +338,16 @@ class PositionGetter:
             return None
 
         game = self._map256_to_game(cx256, cy256)
+        # 边界合理性：SIFT 局部匹配在海洋/未开放区会给出界外鬼坐标
+        # （2026-08-22 实机 r_20260822_012342：[-34336,-99164] ok=True → tp.navigate
+        # dist 10 万单位）。提瓦特有效范围（各国中心 ± 冗余）外直接判失败。
+        if not (_TEYVAT_BOUNDS_X[0] <= game[0] <= _TEYVAT_BOUNDS_X[1]
+                and _TEYVAT_BOUNDS_Y[0] <= game[1] <= _TEYVAT_BOUNDS_Y[1]):
+            self.ctx.observe.event("pos.bigmap", ability="pos", phase="observe",
+                                   mode=mode, ok=False, reason="out_of_map_bounds",
+                                   pos=(round(game[0]), round(game[1])),
+                                   throttle_key="pos.bigmap")
+            return None
         self.ctx.observe.event("pos.bigmap", ability="pos", phase="observe",
                                mode=mode, fallback_used=fallback_used, hit=hit,
                                pos=(round(game[0]), round(game[1])), ok=True,

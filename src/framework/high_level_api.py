@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
@@ -292,6 +293,7 @@ class HighLevelApi:
         from abilities.navigation.map_ops import MapController, MAP_CENTER_X, MAP_CENTER_Y, MAP_SCALE_FACTOR
         from abilities.navigation.position import PositionGetter
         from abilities.navigation.tp import TpDatabase
+        from avc._core import KeyCode
         from framework import utils
 
         mc = MapController(self.ctx, self)
@@ -373,6 +375,45 @@ class HighLevelApi:
         # 2. SIFT 定位视口中心
         pg = PositionGetter(self.ctx)
         viewport = pg.get_position_from_big_map(frame)
+        # 2.5 视口漂移守卫：地图记忆上次视图（任务间残留）。若视口中心远离玩家已知
+        # 位置（ctx._shared_pos_prev，传送种子/上次定位），说明在别人的视图上找花
+        # （2026-08-22 实机 r_20260822_012342：玩家在璃月，视口残留纳塔 → 找了纳塔的
+        # 花 → 跨区导航 600s 超时）→ M/M 复位到玩家中心重检一次。
+        prev = getattr(self.ctx, "_shared_pos_prev", None)
+        if (
+            viewport is not None
+            and isinstance(prev, tuple)
+            and len(prev) == 2
+            and math.hypot(viewport[0] - prev[0], viewport[1] - prev[1]) > 3000.0
+        ):
+            self._observe("detect.blossom", ability="tp", phase="decide",
+                          step="view_reset", ok=True,
+                          reason="viewport_far_from_player",
+                          viewport=(round(viewport[0]), round(viewport[1])),
+                          prev=(round(prev[0]), round(prev[1])))
+            self.ctx.release_all_keys()
+            self.ctx.press(KeyCode.m)  # 关图
+            utils.sleep(0.6)
+            self.ctx.press(KeyCode.m)  # 重开（以玩家为中心，zoom 保持）
+            if not self.wait_scene(Scene.MAP, timeout=8.0):
+                return None
+            utils.sleep(0.5)
+            frame = self.ctx._capture_sc()
+            if frame is None:
+                return None
+            found = mc.find_blossom_on_map(frame)
+            if flower_type:
+                found = [b for b in found if b.blossom_type == flower_type]
+            if not found:
+                evidence = self._save_evidence("find_blossom_after_reset_no_match")
+                self._observe("detect.blossom", ability="tp", phase="observe",
+                              step="find_after_reset", ok=False,
+                              reason="no_blossom_after_view_reset",
+                              evidence=evidence)
+                return None
+            blossoms = found
+            viewport = pg.get_position_from_big_map(frame)
+            zoom = mc.measure_zoom_level(frame) or 3.0
         if viewport is None:
             evidence = self._save_evidence("find_blossom_sift_fail")
             self._observe("detect.blossom", ability="tp", phase="observe",

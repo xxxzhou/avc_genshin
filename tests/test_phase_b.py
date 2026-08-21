@@ -998,16 +998,25 @@ class TestBigMapSiftRelocation:
         return pg
 
     def test_coordinate_chain_full_search(self):
-        """无 expected → matchQueryFull；命中点 (340,335) → _map256_to_game → (6852.0, 15024.0)。"""
+        """无 expected → matchQueryFull；命中点 (1200,335) → _map256_to_game → (6852.0, 11584.0)。
+        （px=1200 在界内：2026-08-22 起 SIFT 结果超提瓦特边界判 out_of_map_bounds）"""
         fm = MagicMock()
         fm.matchQueryFull.return_value = 1  # 全图兜底，>0 视为命中
-        fm.getMatch.return_value = MagicMock(x=340, y=335, w=0, h=0)  # 点结果（w=h=0 哨兵）
+        fm.getMatch.return_value = MagicMock(x=1200, y=335, w=0, h=0)  # 点结果（w=h=0 哨兵）
         pg = self._pg_with(fm, MagicMock())
         # 2026-08-08 轴对换：r.x=西轴(px), r.y=北轴(py)
-        # position[0]北=(2048-335)/0.25=6852.0, position[2]西=(4096-340)/0.25=15024.0
-        assert pg.get_position_from_big_map(frame=MagicMock()) == (6852.0, 15024.0)
+        # position[0]北=(2048-335)/0.25=6852.0, position[2]西=(4096-1200)/0.25=11584.0
+        assert pg.get_position_from_big_map(frame=MagicMock()) == (6852.0, 11584.0)
         fm.matchQueryFull.assert_called_once()
         fm.matchQueryLocal.assert_not_called()
+
+    def test_out_of_bounds_rejected(self):
+        """SIFT 鬼坐标（界外，如 2026-08-22 实机 [-34336,-99164]）→ None。"""
+        fm = MagicMock()
+        fm.matchQueryFull.return_value = 1
+        fm.getMatch.return_value = MagicMock(x=17000, y=335, w=0, h=0)  # west=(4096-17000)/0.25 界外
+        pg = self._pg_with(fm, MagicMock())
+        assert pg.get_position_from_big_map(frame=MagicMock()) is None
 
     def test_returns_none_when_feature_matcher_unavailable(self):
         """fm 创建失败（无 avc/插件）→ None。"""
@@ -1043,7 +1052,7 @@ class TestBigMapSiftRelocation:
 
         fm = MagicMock()
         fm.matchQueryLocal.return_value = 1
-        fm.getMatch.return_value = MagicMock(x=340, y=335, w=0, h=0)
+        fm.getMatch.return_value = MagicMock(x=1200, y=335, w=0, h=0)
         vp = MagicMock()
         vp.width = 480  # 视口缩 1/4 后（BGI resizedGrey 尺度）
         vp.height = 270
@@ -1051,9 +1060,9 @@ class TestBigMapSiftRelocation:
         # expected_center 给游戏坐标（position[0]北, position[2]西 序）；
         # _build_search_rect 转 256 底图系算 roi
         result = pg.get_position_from_big_map(
-            frame=MagicMock(), expected_center=(6852.0, 15024.0)
+            frame=MagicMock(), expected_center=(6852.0, 11584.0)
         )
-        assert result == (6852.0, 15024.0)
+        assert result == (6852.0, 11584.0)
         fm.matchQueryLocal.assert_called_once()
         fm.matchQueryFull.assert_not_called()
         # matchQueryLocal(viewport, roiX, roiY, roiW, roiH, expandCells)
