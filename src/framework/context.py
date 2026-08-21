@@ -22,6 +22,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -68,6 +69,35 @@ def _import_avc():
     return Input, Vision, Image, MouseButton, YuvType
 
 
+class _LockedVisionObject:
+    """avc 有状态视觉对象（tm/ocr）的线程安全代理。
+
+    任务工作线程（navigator/tp/classify_scene 直调）与 loop 线程守护
+    （scene_estimator 10Hz）并发使用同一 ctx.tm/ocr 时，avc 原生对象上的
+    竞争会 access violation 杀进程（2026-08-22 实机 faulthandler 实锤：
+    worker ``clearTemplates`` vs loop ``match``）。代理按调用加锁串行化。
+
+    注：锁粒度是单次调用——跨调用序列（clearTemplates→addTemplatePath→match）
+    仍可能被另一线程插队导致偶发匹配失败（可重试），但不再崩溃。
+    """
+
+    def __init__(self, native, lock: threading.RLock):
+        object.__setattr__(self, "_native", native)
+        object.__setattr__(self, "_lock", lock)
+
+    def __getattr__(self, name):
+        attr = getattr(object.__getattribute__(self, "_native"), name)
+        if not callable(attr):
+            return attr
+        lock = object.__getattribute__(self, "_lock")
+
+        def _locked(*args, **kwargs):
+            with lock:
+                return attr(*args, **kwargs)
+
+        return _locked
+
+
 class GameContext:
     """avc 实例（sc/ic/tm/ocr）单一入口 + 基础（拟人化）输入。"""
 
@@ -84,9 +114,15 @@ class GameContext:
 
         # ── avc 四件套 ──
         self.ic: IInputController = Input.createInputController()
-        # tm/ocr 在 avc 未启用 opencv/ocr 插件时返回 None（降级）
-        self.tm: ITemplateMatcher | None = Vision.createTemplateMatcher()
-        self.ocr: ITextRecognizer | None = Vision.createTextRecognizer()
+        # ⚠ avc 原生对象非线程安全：任务跑在工作线程、守护跑在 loop 线程，两边
+        # 并发调同一 tm/ocr 会 access violation 直接杀进程（2026-08-22 实机
+        # faulthandler 抓栈：worker clearTemplates vs loop match 同一 ctx.tm）。
+        # 用锁代理串行化所有调用。tm/ocr 在 avc 未启用插件时返回 None（降级）。
+        self._vision_lock = threading.RLock()
+        _tm = Vision.createTemplateMatcher()
+        _ocr = Vision.createTextRecognizer()
+        self.tm = _LockedVisionObject(_tm, self._vision_lock) if _tm else None
+        self.ocr = _LockedVisionObject(_ocr, self._vision_lock) if _ocr else None
         self._Image = Image
         self._MouseButton = MouseButton
         self._YuvType = YuvType
