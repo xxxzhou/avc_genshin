@@ -347,18 +347,39 @@ class HighLevelApi:
                       count=len(blossoms), ok=len(blossoms) > 0,
                       reason=None if blossoms else "no_blossom_initial")
         if blossoms:
-            # 把最近的花移到视口中心，再缩放
-            best = blossoms[0]
-            north_delta = (MAP_CENTER_Y - best.screen_y) * zoom / MAP_SCALE_FACTOR
-            west_delta = (MAP_CENTER_X - best.screen_x) * zoom / MAP_SCALE_FACTOR
-            if abs(north_delta) > 100 or abs(west_delta) > 100:
+            # 把最近的花移到视口中心，再缩放（⚠ 2026-08-22 实机 r_075346：拖拽实际
+            # 位移欠额 ~20%，单次拖拽后花可能仍在边缘 → set_zoom(3.0) 视野减半把
+            # 它切出视野 → 3.0 复检全 0。居中后验证 <350px，否则补拖一次）
+            for _center_try in range(2):
+                best = blossoms[0]
+                if abs(best.screen_x - MAP_CENTER_X) < 350 and abs(best.screen_y - MAP_CENTER_Y) < 350:
+                    break
+                north_delta = (MAP_CENTER_Y - best.screen_y) * zoom / MAP_SCALE_FACTOR
+                west_delta = (MAP_CENTER_X - best.screen_x) * zoom / MAP_SCALE_FACTOR
+                if abs(north_delta) <= 100 and abs(west_delta) <= 100:
+                    break
                 mc.drag_map(north_delta, west_delta, zoom)
-                utils.sleep(0.3)
+                utils.sleep(0.8)  # 拖拽惯性 settle
                 frame = self.ctx._capture_sc()
                 if frame is None:
                     self._observe("detect.blossom", ability="tp", phase="observe",
                                   step="recapture_after_drag", ok=False, reason="no_frame")
                     return None
+                re_found = mc.find_blossom_on_map(frame)
+                if re_found:
+                    blossoms = re_found
+                else:
+                    # 补拖后丢花（拖过头/动画）→ 视野回到 4.4 重找一次
+                    mc.set_zoom_level(4.4, frame)
+                    utils.sleep(0.5)
+                    frame = self.ctx._capture_sc()
+                    if frame is None:
+                        return None
+                    re_found = mc.find_blossom_on_map(frame)
+                    if not re_found:
+                        break
+                    blossoms = re_found
+                    zoom = 4.4
         mc.set_zoom_level(3.0, frame)
         # ⚠ 2026-08-15 实机（r_20260815_093453/093814/094006 三连漏检）：缩放动画 +
         # SourcePlayer 地图交互期间帧冻结/滞后——ctx.capture() 的重试帧漏检，而失败
@@ -395,10 +416,12 @@ class HighLevelApi:
         # 1. 检测花图标（blossoms 已在重试循环中填充）
         if not blossoms:
             # 四方向平移扩搜（2026-08-22 实机 r_074901：玩家复位在蒙德城，城周边
-            # ±2000 单位内真没花——地脉花不刷城边。向四野各平移 ~2500 单位重检，
-            # 命中即把该方向视图当检测现场继续走主流程）
-            for nd, wd in ((2500, 0), (0, 2500), (-2500, 0), (0, -2500)):
-                mc.drag_map(nd, wd, 3.0)
+            # ±2000 单位内真没花——地脉花不刷城边。⚠ 平移在 4.4 宽档做（r_075346：
+            # 3.0 窄档单 pan 覆盖不够、九宫漏对角）。命中后回主流程居中+放大）
+            mc.set_zoom_level(4.4, frame)
+            utils.sleep(0.5)
+            for nd, wd in ((3000, 0), (0, 3000), (-3000, 0), (0, -3000)):
+                mc.drag_map(nd, wd, 4.4)
                 utils.sleep(0.8)  # 拖拽惯性 settle
                 frame = self.ctx._capture_sc()
                 if frame is None:
@@ -411,6 +434,7 @@ class HighLevelApi:
                     found = [b for b in found if b.blossom_type == flower_type]
                 if found:
                     blossoms = found
+                    zoom = 4.4
                     break
         if not blossoms:
             # ⚠ 失败时存图：让 AI 能看到当时地图状态（视口是否对/zoom 是否对）
