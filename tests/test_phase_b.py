@@ -1152,7 +1152,10 @@ class TestMapControllerZoom:
             assert call.args == (0, -1)
 
     def test_set_zoom_level_none_when_unmeasurable(self, monkeypatch):
-        """测不到 zoom → 不滚轮，返回 None。"""
+        """测不到 zoom → 盲缩兜底（3×10 槽放大方向）后仍测不到 → 返回 None。
+
+        2026-08-22 改：概览档测不到时不再直接放弃（地图卡死全链失效），先盲滚。
+        """
         monkeypatch.setattr(
             "abilities.navigation.map_ops.utils.sleep", lambda *a, **k: None
         )
@@ -1160,7 +1163,8 @@ class TestMapControllerZoom:
         mc = _mc(ctx)
         mc.measure_zoom_level = MagicMock(return_value=None)
         assert mc.set_zoom_level(5.0) is None
-        ctx.ic.scroll.assert_not_called()
+        # 盲缩 3 轮 × 10 槽（放大方向 = _ZOOM_WHEEL_SIGN）
+        assert ctx.ic.scroll.call_count == 30
 
 
 class TestMapControllerDrag:
