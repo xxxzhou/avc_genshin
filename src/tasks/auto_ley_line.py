@@ -128,24 +128,38 @@ def main(ctx, g, region: str = "蒙德", flower_type: str = "", count: int = 4) 
                     ),
                 )
 
-                # 3. 走到花（容差 25：r_20260822_025353 实机 dist 52-137 绕花打转——
-                # 容差 8 过紧，到达 F 交互圈边缘即停比穿过花心再折返稳）
-                if not g.go_to(info["blossom_pos"], tolerance=25.0, timeout=150.0):
-                    raise _BlossomRetry("go_to_timeout")
+                # 3. 走到花（容差 60：2026-08-22 实机三轮 demo 反复证明近距绕花打转
+                # 卡在 60-130——F 交互圈边缘即停，别追求穿过花心）
+                arrived = g.go_to(info["blossom_pos"], tolerance=60.0, timeout=150.0)
                 ob.event(
                     "auto_ley_line.step", ability="auto_ley_line", phase="act",
-                    step="go_to_blossom", iter=itr, attempt=attempt, ok=True,
+                    step="go_to_blossom", iter=itr, attempt=attempt, ok=arrived,
                     evidence=ob.save_evidence(
                         ctx, f"arrived_blossom_iter{itr}_try{attempt}"
                     ),
                 )
 
-                # 4. 激活地脉花
-                if not g.wait_until(lambda: has_flower_f_icon(ctx), timeout=60):
+                # 4. 激活地脉花：边转视角边找 F（花可能在背后；等待 60s 内每 3s
+                # 转 ~60° 扫 360°——纯被动等会漏背向的花）
+                import time as _time
+
+                scan_deadline = _time.monotonic() + 60.0
+                found_f = False
+                while _time.monotonic() < scan_deadline:
+                    if has_flower_f_icon(ctx):
+                        found_f = True
+                        break
+                    try:
+                        ctx.move_by_rel(350, 0)  # 水平转 ~60°
+                    except Exception:
+                        pass
+                    _time.sleep(2.5)
+                if not found_f:
                     ob.event(
                         "auto_ley_line.step", ability="auto_ley_line",
                         phase="observe", step="flower_wait", iter=itr,
                         attempt=attempt, ok=False, reason="no_flower_icon",
+                        arrived=arrived,
                     )
                     raise _BlossomRetry("no_flower_icon")
                 break  # 到位且有交互提示 → 出重试循环去激活

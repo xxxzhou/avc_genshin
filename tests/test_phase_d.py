@@ -126,6 +126,10 @@ class TestAutoLeyLine:
     def test_happy_path(self, monkeypatch):
         """v2：动态找花 → 传送 → 战斗 → 领奖 一轮正常返回。"""
         monkeypatch.setattr("abilities.reward.claim_resin_reward", _claim_true)
+        # F 扫描循环直接调 has_flower_f_icon（2026-08-22 起不再走 g.wait_until）
+        monkeypatch.setattr(
+            "abilities.game_state.has_flower_f_icon", lambda ctx, frame=None: True
+        )
         g = _g()
         nearest_tp = MagicMock()
         nearest_tp.name = "七天神像-风"
