@@ -1298,8 +1298,10 @@ class TestMapControllerCountryAndIcon:
     def test_icon_paths_teleport_waypoint(self):
         from abilities.navigation.map_ops import MapController
 
+        # 2026-08-22：官方资产实机失配 → live 变体并存（文件存在即并入）
         assert MapController._icon_paths_for("TeleportWaypoint") == [
-            "teleport/TeleportWaypoint.png"
+            "teleport/TeleportWaypoint.png",
+            "teleport/TeleportWaypoint_live.png",
         ]
 
     def test_icon_paths_domain_supplements_domain2(self):

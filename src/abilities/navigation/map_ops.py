@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from framework import utils
+from framework.resources import res
 
 from abilities import vision_utils as vu
 
@@ -454,11 +455,24 @@ class MapController:
 
     @staticmethod
     def _icon_paths_for(target_type: str) -> list[str]:
-        """该 type 的候选图标模板（秘境类补 Domain2）。"""
+        """该 type 的候选图标模板（秘境类补 Domain2 + 官方资产失配时 live 变体并用）。
+
+        live 变体约定：与官方模板同目录同名 + ``_live`` 后缀（如
+        TeleportWaypoint_live.png）。2026-08-22 实机（r_075828）：官方
+        TeleportWaypoint.png 导航贴脸时 0 命中（icon_miss → 兜底点中心撞 pin），
+        live 裁剪模板同帧 1.0——同 F 图标/藏金花模板的官方资产失配规律。
+        锚点全图多处，多模板取并集不影响候选排序（按距视口中心升序）。
+        """
         primary = _TP_ICON_BY_TYPE.get(target_type)
         paths: list[str] = []
         if primary:
             paths.append(primary)
+            live = primary.replace(".png", "_live.png")
+            try:
+                if live != primary and res.template(live).exists():
+                    paths.append(live)
+            except Exception:
+                pass
         if target_type in _DOMAIN_TYPES and "teleport/Domain2.png" not in paths:
             paths.append("teleport/Domain2.png")
         return paths
